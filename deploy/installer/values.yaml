@@ -62,10 +62,10 @@ installer:
       memory: 128Mi
   podSecurityContext:
     enabled: false
-    fsGroup: 1000
+    fsGroup: 1001
   containerSecurityContext:
     enabled: false
-    runAsUser: 1000
+    runAsUser: 1001
     runAsNonRoot: true
   leaderElection:
     enabled: true

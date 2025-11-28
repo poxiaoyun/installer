@@ -5,11 +5,11 @@ import (
 
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
-	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
+	"xiaoshiai.cn/installer/install"
 )
 
-func KustomizeBuildFunc(ctx context.Context, instance *appsv1.Instance, dir string) ([]byte, error) {
-	return KustomizeBuild(ctx, dir)
+func KustomizeBuildFunc(ctx context.Context, instance install.Instance) ([]byte, error) {
+	return KustomizeBuild(ctx, instance.Location)
 }
 
 func KustomizeBuild(ctx context.Context, dir string) ([]byte, error) {
