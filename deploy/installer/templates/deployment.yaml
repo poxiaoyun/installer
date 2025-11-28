@@ -75,7 +75,7 @@ spec:
           {{- else }}
           args:
             {{- if .Values.installer.leaderElection.enabled }}
-            - --enable-leader-election
+            - --leader-election
             {{- end }}
             - --probe-addr=:{{- .Values.installer.containerPorts.probe }}
             {{- if .Values.installer.metrics.enabled }}

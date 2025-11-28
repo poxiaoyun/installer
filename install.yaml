@@ -17,21 +17,27 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: Version of the instance
+    - description: Chart version
       jsonPath: .status.version
-      name: Version
+      name: VERSION
       type: string
-    - description: Status of the instance
+    - description: App version
+      jsonPath: .status.appVersion
+      name: APP
+      priority: 1
+      type: string
+    - description: Current phase
       jsonPath: .status.phase
-      name: Status
+      name: PHASE
       type: string
-    - description: UpgradeTimestamp of the instance
+    - description: Last upgrade
       jsonPath: .status.upgradeTimestamp
-      name: UpgradeTimestamp
+      name: UPDATE
+      priority: 1
       type: date
-    - description: CreationTimestamp of the instance
+    - description: Creation time
       jsonPath: .metadata.creationTimestamp
-      name: Age
+      name: AGE
       type: date
     name: v1
     schema:
@@ -108,15 +114,8 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
-              disabled:
-                description: Disabled indicates that the instance should not be installed.
-                type: boolean
-              installNamespace:
-                description: |-
-                  InstallNamespace is the namespace to install the instance into.
-                  If not specified, the instance will be installed into the namespace of the instance.
-                type: string
               kind:
+                default: helm
                 description: Kind instance kind.
                 enum:
                 - helm
@@ -169,7 +168,6 @@ spec:
                 type: string
             required:
             - url
-            - version
             type: object
           status:
             properties:
@@ -300,15 +298,19 @@ spec:
           image: docker.io/xiaoshiai/installer:latest
           imagePullPolicy: IfNotPresent
           args:
-            - --enable-leader-election
+            - --leader-election
             - --probe-addr=:8080
             - --metrics-addr=:9100
           env:
             - name: LOG_LEVEL
               value: debug
           resources:
-            limits: {}
-            requests: {}
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
           ports:
             - name: probe
               containerPort: 8080

@@ -33,8 +33,8 @@ func NewInstallerCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&options.MetricsAddr, "metrics-addr", "", options.MetricsAddr, "metrics address")
 	cmd.Flags().StringVarP(&options.ProbeAddr, "probe-addr", "", options.ProbeAddr, "probe address")
-	cmd.Flags().BoolVarP(&options.LeaderElection, "leader-elect", "", options.LeaderElection, "enable leader election")
-	cmd.Flags().StringVarP(&options.LeaderElectionID, "leader-elect-id", "", options.LeaderElectionID, "leader election id")
+	cmd.Flags().BoolVarP(&options.LeaderElection, "leader-election", "", options.LeaderElection, "enable leader election")
+	cmd.Flags().StringVarP(&options.LeaderElectionID, "leader-election-id", "", options.LeaderElectionID, "leader election id")
 	cmd.Flags().StringVarP(&options.CacheDir, "cache-dir", "", options.CacheDir, "cache directory for downloaded bundle charts")
 	return cmd
 }

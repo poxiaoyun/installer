@@ -9,7 +9,7 @@ GIT_VERSION?=$(shell git describe --tags --dirty 2>/dev/null)
 GIT_COMMIT?=$(shell git rev-parse HEAD 2>/dev/null)
 GIT_BRANCH?=$(shell git symbolic-ref --short HEAD 2>/dev/null)
 
-BIN_DIR = ${PWD}/bin
+BIN_DIR = bin
 ifeq (${GIT_VERSION},)
 	GIT_VERSION=${GIT_BRANCH}
 endif
@@ -17,13 +17,11 @@ endif
 # semver version
 VERSION?=$(shell echo "${GIT_VERSION}" | sed -e 's/^v//')
 
-IMAGE_REGISTRY?=docker.io
+REGISTRY?=docker.io
+REPOSITORY?=xiaoshiai/installer
 IMAGE_TAG=${GIT_VERSION}
-ifeq (${IMAGE_TAG},main)
-   IMAGE_TAG = latest
-endif
 # Image URL to use all building/pushing image targets
-IMAGE ?=  ${IMAGE_REGISTRY}/xiaoshiai/installer:$(IMAGE_TAG)
+IMAGE ?=  ${REGISTRY}/${REPOSITORY}:$(IMAGE_TAG)
 
 GOPACKAGE=$(shell go list -m)
 ldflags+=-w -s
@@ -47,9 +45,15 @@ add-license:
 
 build: build-binaries
 
+define build-binary
+	@echo "Building ${1}-${2}";
+	@mkdir -p ${BIN_DIR}/${1}-${2};
+	GOOS=${1} GOARCH=$(2) CGO_ENABLED=0 go build -gcflags=all="-N -l" -ldflags="${LDFLAGS}" -o ${BIN_DIR}/${1}-${2} ./cmd/...
+endef
+.PHONY: build
 build-binaries:
-	- mkdir -p ${BIN_DIR}
-	CGO_ENABLED=0 go build -o ${BIN_DIR}/ -gcflags=all="-N -l" -ldflags="${ldflags}" ${GOPACKAGE}/cmd/...
+	$(call build-binary,linux,amd64)
+	$(call build-binary,linux,arm64)
 
 test: 
 	go test ./... -coverprofile=cover.out -covermode=atomic
@@ -60,7 +64,7 @@ install.yaml:
 	helm template installer --include-crds --namespace installer deploy/installer > install.yaml
 
 release-image: build-binaries
-	docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE} --push .
+	docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE} --push -f Dockerfile ${BIN_DIR}
 
 CONTROLLER_GEN = ${BIN_DIR}/controller-gen
 controller-gen: ## Download controller-gen locally if necessary.

@@ -1,4 +1,5 @@
 FROM alpine
-COPY bin/ /usr/local/bin/
-WORKDIR /
+# TARGETOS TARGETARCH already set by '--platform'
+ARG TARGETOS TARGETARCH
+COPY ${TARGETOS}-${TARGETARCH}/ /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/installer"]

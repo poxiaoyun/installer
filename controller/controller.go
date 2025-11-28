@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,12 +35,13 @@ type Options struct {
 }
 
 func NewDefaultOptions() *Options {
+	home, _ := os.UserHomeDir()
 	return &Options{
 		MetricsAddr:      ":9090",
 		ProbeAddr:        ":8081",
 		LeaderElection:   false,
 		LeaderElectionID: "installer-leader-election",
-		CacheDir:         "~/.cache/installer",
+		CacheDir:         filepath.Join(home, ".cache", "installer"),
 	}
 }
 

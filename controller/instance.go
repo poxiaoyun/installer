@@ -192,7 +192,7 @@ func (r *InstanceReconciler) checkDepenency(ctx context.Context, instance *appsv
 }
 
 func (r *InstanceReconciler) resolveValuesRef(ctx context.Context, instance *appsv1.Instance) error {
-	base := map[string]interface{}{}
+	base := map[string]any{}
 
 	for _, ref := range instance.Spec.ValuesFrom {
 		switch strings.ToLower(ref.Kind) {
@@ -220,7 +220,7 @@ func (r *InstanceReconciler) resolveValuesRef(ctx context.Context, instance *app
 			}
 			// -f/--values
 			for k, v := range configmap.BinaryData {
-				currentMap := map[string]interface{}{}
+				currentMap := map[string]any{}
 				if err := yaml.Unmarshal(v, &currentMap); err != nil {
 					return fmt.Errorf("parse %#v key[%s]: %w", ref, k, err)
 				}
@@ -243,15 +243,15 @@ func (r *InstanceReconciler) resolveValuesRef(ctx context.Context, instance *app
 	return nil
 }
 
-func mergeMaps(a, b map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(a))
+func mergeMaps(a, b map[string]any) map[string]any {
+	out := make(map[string]any, len(a))
 	for k, v := range a {
 		out[k] = v
 	}
 	for k, v := range b {
-		if v, ok := v.(map[string]interface{}); ok {
+		if v, ok := v.(map[string]any); ok {
 			if bv, ok := out[k]; ok {
-				if bv, ok := bv.(map[string]interface{}); ok {
+				if bv, ok := bv.(map[string]any); ok {
 					out[k] = mergeMaps(bv, v)
 					continue
 				}
@@ -262,7 +262,7 @@ func mergeMaps(a, b map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-func mergeInto(k, v string, base map[string]interface{}) error {
+func mergeInto(k, v string, base map[string]any) error {
 	if err := strvals.ParseInto(fmt.Sprintf("%s=%s", k, v), base); err != nil {
 		return fmt.Errorf("parse %#v key[%s]: %w", k, v, err)
 	}
