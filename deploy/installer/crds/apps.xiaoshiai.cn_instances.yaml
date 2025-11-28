@@ -1,0 +1,225 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: instances.apps.xiaoshiai.cn
+spec:
+  group: apps.xiaoshiai.cn
+  names:
+    kind: Instance
+    listKind: InstanceList
+    plural: instances
+    singular: instance
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Chart version
+      jsonPath: .status.version
+      name: VERSION
+      type: string
+    - description: App version
+      jsonPath: .status.appVersion
+      name: APP
+      priority: 1
+      type: string
+    - description: Current phase
+      jsonPath: .status.phase
+      name: PHASE
+      type: string
+    - description: Last upgrade
+      jsonPath: .status.upgradeTimestamp
+      name: UPDATE
+      priority: 1
+      type: date
+    - description: Creation time
+      jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              chart:
+                description: Chart is the name of the chart to install.
+                type: string
+              dependencies:
+                description: |-
+                  Dependencies is a list of instances that this instance depends on.
+                  The instance will be installed after all dependencies are exists.
+                items:
+                  description: ObjectReference contains enough information to let
+                    you inspect or modify the referred object.
+                  properties:
+                    apiVersion:
+                      description: API version of the referent.
+                      type: string
+                    fieldPath:
+                      description: |-
+                        If referring to a piece of an object instead of an entire object, this string
+                        should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+                        For example, if the object reference is to a container within a pod, this would take on a value like:
+                        "spec.containers{name}" (where "name" refers to the name of the container that triggered
+                        the event) or if no container name is specified "spec.containers[2]" (container with
+                        index 2 in this pod). This syntax is chosen only to have some well-defined way of
+                        referencing a part of an object.
+                      type: string
+                    kind:
+                      description: |-
+                        Kind of the referent.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                      type: string
+                    name:
+                      description: |-
+                        Name of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+                      type: string
+                    resourceVersion:
+                      description: |-
+                        Specific resourceVersion to which this reference is made, if any.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+                      type: string
+                    uid:
+                      description: |-
+                        UID of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              kind:
+                default: helm
+                description: Kind instance kind.
+                enum:
+                - helm
+                - kustomize
+                - template
+                type: string
+              path:
+                description: Path is the path in a tarball to the chart/kustomize.
+                type: string
+              url:
+                description: URL is the URL of helm repository, git clone url, tarball
+                  url, s3 url, etc.
+                type: string
+              values:
+                description: Values is a nested map of helm values.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              valuesFrom:
+                description: |-
+                  ValuesFiles is a list of references to helm values files.
+                  Ref can be a configmap or secret.
+                items:
+                  properties:
+                    kind:
+                      description: Kind is the type of resource being referenced
+                      enum:
+                      - ConfigMap
+                      - Secret
+                      type: string
+                    name:
+                      description: Name is the name of resource being referenced
+                      type: string
+                    namespace:
+                      type: string
+                    optional:
+                      description: Optional set to true to ignore references not found
+                        error
+                      type: boolean
+                    prefix:
+                      description: An optional identifier to prepend to each key in
+                        the ConfigMap. Must be a C_IDENTIFIER.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+              version:
+                description: Version is the version of helm chart, git revision, etc.
+                type: string
+            required:
+            - url
+            type: object
+          status:
+            properties:
+              appVersion:
+                description: AppVersion is the app version of the instance.
+                type: string
+              creationTimestamp:
+                description: CreationTimestamp is the first creation timestamp of
+                  the instance.
+                format: date-time
+                type: string
+              message:
+                description: |-
+                  Message is the message associated with the status
+                  In helm, it's the notes contents.
+                type: string
+              namespace:
+                description: Namespace is the namespace where the instance is installed.
+                type: string
+              phase:
+                description: Phase is the current state of the release
+                type: string
+              resources:
+                description: Resources is a list of resources created/managed by the
+                  instance.
+                items:
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  type: object
+                type: array
+              upgradeTimestamp:
+                description: UpgradeTimestamp is the time when the instance was last
+                  upgraded.
+                format: date-time
+                type: string
+              values:
+                description: Values is a nested map of final helm values.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              version:
+                description: |-
+                  Version is the version of the instance.
+                  In helm, Version is the version of the chart.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,14 @@
+.idea
+__debug_bin*
+.vscode
+tmp/
+bin/
+vendor/
+certs/
+config/*.yaml
+_.yaml
+*.sqlite3
+*.bak
+.cache
+*.tgz
+cover.out

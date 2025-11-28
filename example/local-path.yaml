@@ -1,0 +1,8 @@
+apiVersion: apps.xiaoshiai.cn/v1
+kind: Instance
+metadata:
+  name: local-path-provisioner
+  namespace: local-path
+spec:
+  url: https://github.com/rancher/local-path-provisioner/archive/refs/tags/v0.0.32.zip
+  path: "local-path-provisioner-0.0.32/deploy/chart/local-path-provisioner"
