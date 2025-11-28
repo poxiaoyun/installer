@@ -3,8 +3,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"helm.sh/helm/v3/pkg/strvals"
@@ -23,7 +25,9 @@ import (
 	"sigs.k8s.io/yaml"
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
-	"xiaoshiai.cn/installer/applyer"
+	"xiaoshiai.cn/installer/install"
+	"xiaoshiai.cn/installer/install/delegate"
+	"xiaoshiai.cn/installer/utils"
 )
 
 const MaxConcurrentReconciles = 5
@@ -37,7 +41,7 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	r := &InstanceReconciler{
 		Client:  cli,
 		Scheme:  mgr.GetScheme(),
-		Applier: applyer.NewDefaultApply(cfg, cli, &applyer.Options{CacheDir: options.CacheDir}),
+		Applier: delegate.NewDelegate(cfg, cli, &delegate.Options{CacheDir: options.CacheDir}),
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.Instance{}).
@@ -71,7 +75,7 @@ func ValueFromEventHandler[T client.Object](cli client.Client) handler.TypedEven
 type InstanceReconciler struct {
 	Client  client.Client
 	Scheme  *runtime.Scheme
-	Applier *applyer.BundleApplier
+	Applier install.Installer
 }
 
 func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -128,15 +132,65 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance) error {
+	log := logr.FromContextOrDiscard(ctx)
 	// check all dependencies are installed
 	if err := r.checkDepenency(ctx, instance); err != nil {
 		return err
 	}
 	// resolve valuesRef
-	if err := r.resolveValuesRef(ctx, instance); err != nil {
+	values, err := r.resolveValues(ctx, instance)
+	if err != nil {
 		return err
 	}
-	return r.Applier.Apply(ctx, instance)
+	instanceSpec := installerInstanceFrom(instance, values)
+
+	// check upgrade
+	if instance.Status.Phase == appsv1.PhaseInstalled &&
+		instance.Spec.Version == instance.Status.Version &&
+		utils.EqualMapValues(instance.Status.Values.Object, values) {
+		log.Info("already uptodate")
+		return nil
+	}
+	log.Info("applying instance")
+	result, err := r.Applier.Apply(ctx, instanceSpec)
+	if err != nil {
+		log.Error(err, "apply instance")
+		return err
+	}
+	log.Info("applied instance successfully")
+	instance.Status.Phase = appsv1.PhaseInstalled
+	instance.Status.Message = result.Note
+	instance.Status.Namespace = result.Namespace
+	instance.Status.CreationTimestamp = convtime(result.CreationTimestamp)
+	instance.Status.UpgradeTimestamp = convtime(result.UpgradeTimestamp)
+	instance.Status.Values = appsv1.Values{Object: result.Values}
+	instance.Status.Version = result.Version
+	instance.Status.AppVersion = result.AppVersion
+	instance.Status.Resources = result.Resources
+	return nil
+}
+
+func installerInstanceFrom(instance *appsv1.Instance, values map[string]any) install.Instance {
+	return install.Instance{
+		Name:              instance.Name,
+		Namespace:         instance.Namespace,
+		Kind:              instance.Spec.Kind,
+		Repository:        instance.Spec.URL,
+		Version:           instance.Spec.Version,
+		Path:              instance.Spec.Path,
+		Chart:             instance.Spec.Chart,
+		Values:            values,
+		Resources:         instance.Status.Resources,
+		CreationTimestamp: instance.Status.CreationTimestamp.Time,
+		UpgradeTimestamp:  instance.Status.UpgradeTimestamp.Time,
+	}
+}
+
+// https://github.com/golang/go/issues/19502
+// metav1.Time and time.Time are not comparable directly
+func convtime(t time.Time) metav1.Time {
+	t, _ = time.Parse(time.RFC3339, t.Format(time.RFC3339))
+	return metav1.Time{Time: t}
 }
 
 type DependencyError struct {
@@ -191,7 +245,7 @@ func (r *InstanceReconciler) checkDepenency(ctx context.Context, instance *appsv
 	return nil
 }
 
-func (r *InstanceReconciler) resolveValuesRef(ctx context.Context, instance *appsv1.Instance) error {
+func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1.Instance) (map[string]any, error) {
 	base := map[string]any{}
 
 	for _, ref := range instance.Spec.ValuesFrom {
@@ -202,12 +256,12 @@ func (r *InstanceReconciler) resolveValuesRef(ctx context.Context, instance *app
 				if apierrors.IsNotFound(err) && ref.Optional {
 					continue
 				}
-				return err
+				return nil, err
 			}
 			// --set
 			for k, v := range secret.Data {
 				if err := mergeInto(ref.Prefix+k, string(v), base); err != nil {
-					return fmt.Errorf("parse %#v key[%s]: %w", ref, k, err)
+					return nil, fmt.Errorf("parse %#v key[%s]: %w", ref, k, err)
 				}
 			}
 		case "configmap":
@@ -216,38 +270,35 @@ func (r *InstanceReconciler) resolveValuesRef(ctx context.Context, instance *app
 				if apierrors.IsNotFound(err) && ref.Optional {
 					continue
 				}
-				return err
+				return nil, err
 			}
 			// -f/--values
 			for k, v := range configmap.BinaryData {
 				currentMap := map[string]any{}
 				if err := yaml.Unmarshal(v, &currentMap); err != nil {
-					return fmt.Errorf("parse %#v key[%s]: %w", ref, k, err)
+					return nil, fmt.Errorf("parse %#v key[%s]: %w", ref, k, err)
 				}
 				base = mergeMaps(base, currentMap)
 			}
 			// --set
 			for k, v := range configmap.Data {
 				if err := mergeInto(ref.Prefix+k, string(v), base); err != nil {
-					return fmt.Errorf("parse %#v key[%s]: %w", ref, k, err)
+					return nil, fmt.Errorf("parse %#v key[%s]: %w", ref, k, err)
 				}
 			}
 		default:
-			return fmt.Errorf("valuesRef kind [%s] is not supported", ref.Kind)
+			return nil, fmt.Errorf("valuesRef kind [%s] is not supported", ref.Kind)
 		}
 	}
 
 	// inlined values
 	base = mergeMaps(base, instance.Spec.Values.Object)
-	instance.Spec.Values = appsv1.Values{Object: base}
-	return nil
+	return base, nil
 }
 
 func mergeMaps(a, b map[string]any) map[string]any {
 	out := make(map[string]any, len(a))
-	for k, v := range a {
-		out[k] = v
-	}
+	maps.Copy(out, a)
 	for k, v := range b {
 		if v, ok := v.(map[string]any); ok {
 			if bv, ok := out[k]; ok {
@@ -270,5 +321,13 @@ func mergeInto(k, v string, base map[string]any) error {
 }
 
 func (r *InstanceReconciler) Remove(ctx context.Context, instance *appsv1.Instance) error {
-	return r.Applier.Remove(ctx, instance)
+	log := logr.FromContextOrDiscard(ctx)
+
+	log.Info("removing instance")
+	if instance.Status.Phase == appsv1.PhaseDisabled {
+		log.Info("already removed or not installed")
+		return nil
+	}
+	instanceSpec := installerInstanceFrom(instance, instance.Spec.Values.Object)
+	return r.Applier.Remove(ctx, instanceSpec)
 }

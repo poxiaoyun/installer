@@ -1,4 +1,4 @@
-package applyer
+package download
 
 import "testing"
 

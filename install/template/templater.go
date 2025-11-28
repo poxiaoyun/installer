@@ -19,10 +19,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
-	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
+	"xiaoshiai.cn/installer/install"
 )
 
-func NewTemplaterFunc(cfg *rest.Config) func(ctx context.Context, instance *appsv1.Instance, dir string) ([]byte, error) {
+func NewTemplaterFunc(cfg *rest.Config) func(ctx context.Context, instance install.Instance) ([]byte, error) {
 	return Templater{Config: cfg}.Template
 }
 
@@ -32,12 +32,14 @@ type Templater struct {
 }
 
 // TemplatesTemplate using helm template engine to render,but allow apply to different namespaces
-func (t Templater) Template(ctx context.Context, instance *appsv1.Instance, dir string) ([]byte, error) {
+func (t Templater) Template(ctx context.Context, instance install.Instance) ([]byte, error) {
+	dir := instance.Location
+
 	chart, err := loader.Load(dir)
 	if err != nil {
 		return nil, err
 	}
-	vals := instance.Spec.Values.Object
+	vals := instance.Values
 	options := chartutil.ReleaseOptions{
 		Name:      instance.Name,
 		Namespace: instance.Namespace,

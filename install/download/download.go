@@ -1,4 +1,4 @@
-package applyer
+package download
 
 import (
 	"archive/tar"
@@ -21,7 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/go-logr/logr"
-	"xiaoshiai.cn/installer/applyer/helm"
+	"xiaoshiai.cn/installer/install/helm"
 )
 
 const (
@@ -37,9 +37,17 @@ type DownloadMeta struct {
 	Version string
 }
 
+type Downloader struct {
+	CacheDir string
+}
+
+func NewDownloader(cacheDir string) *Downloader {
+	return &Downloader{CacheDir: cacheDir}
+}
+
 // we cache "bundle" in a directory with name
 // "{repo host}/{name}-{version} or {repo host}/{name}-{version}.tgz" under cache directory
-func Download(ctx context.Context, repo, name, version, path, cacheDir string) (string, error) {
+func (d *Downloader) Download(ctx context.Context, repo, name, version, path string) (string, error) {
 	log := logr.FromContextOrDiscard(ctx)
 	if name == "" {
 		return "", errors.New("empty name")
@@ -52,7 +60,7 @@ func Download(ctx context.Context, repo, name, version, path, cacheDir string) (
 		basename = name + "-" + version
 	}
 	// from cache
-	perRepoCacheDir := PerRepoCacheDir(repo, cacheDir)
+	perRepoCacheDir := PerRepoCacheDir(repo, d.CacheDir)
 	if cachepath := foundInCache(ctx, perRepoCacheDir, basename); cachepath != "" {
 		log.Info("found in cache", "path", cachepath)
 		return cachepath, nil
