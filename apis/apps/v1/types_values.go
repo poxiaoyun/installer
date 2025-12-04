@@ -81,5 +81,9 @@ func (v *Values) UnmarshalJSON(in []byte) error {
 }
 
 func (re Values) MarshalJSON() ([]byte, error) {
+	// Values always an object; if nil, marshal as empty object
+	if re.Object == nil {
+		return []byte("{}"), nil
+	}
 	return json.Marshal(re.Object)
 }

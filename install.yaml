@@ -295,8 +295,8 @@ spec:
       
       containers:
         - name: installer
-          image: docker.io/xiaoshiai/installer:latest
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/poxiaoyun/installer:main
+          imagePullPolicy: Always
           args:
             - --leader-election
             - --probe-addr=:8080

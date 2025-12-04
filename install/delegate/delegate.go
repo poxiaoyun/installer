@@ -54,11 +54,10 @@ func (b *BundleApplier) Template(ctx context.Context, instance install.Instance)
 }
 
 func (b *BundleApplier) Download(ctx context.Context, instance install.Instance) (string, error) {
-	name := instance.Name
-	if chart := instance.Chart; chart != "" {
-		name = chart
+	if chart := instance.Chart; chart == "" {
+		instance.Chart = instance.Name
 	}
-	return b.downloader.Download(ctx, instance.Repository, name, instance.Version, instance.Path)
+	return b.downloader.Download(ctx, instance)
 }
 
 func (b *BundleApplier) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {

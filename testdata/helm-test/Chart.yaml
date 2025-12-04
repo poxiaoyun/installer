@@ -1,0 +1,14 @@
+apiVersion: v2
+name: helm-test
+description: A minimal Helm chart used by unit tests
+type: application
+version: 0.1.0
+appVersion: "1.0"
+keywords:
+  - test
+  - installer
+maintainers:
+  - name: test
+    email: test@example.com
+sources:
+  - https://example.local/

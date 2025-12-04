@@ -13,6 +13,11 @@ func TestPerRepoCacheDir(t *testing.T) {
 			basedir: "/app/plugins",
 			want:    "/app/plugins/foo.com/bar",
 		},
+		{
+			repo:    "file:///tmp/my-repo",
+			basedir: "/tmp/cache",
+			want:    "/tmp/cache/my-repo",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.repo, func(t *testing.T) {

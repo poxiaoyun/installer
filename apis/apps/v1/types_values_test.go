@@ -76,8 +76,8 @@ func TestUnmarshalJSON_NullInputDoesNotOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalJSON(null) returned error: %v", err)
 	}
-	if val, ok := v.Object["a"]; !ok || val != "b" {
-		t.Fatalf("UnmarshalJSON(null) modified Object: got %v", v.Object)
+	if v.Object != nil {
+		t.Fatalf("UnmarshalJSON(null) did not set Object to nil: got %v", v.Object)
 	}
 }
 

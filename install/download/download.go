@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/memory"
 	"github.com/go-logr/logr"
+	"xiaoshiai.cn/installer/install"
 	"xiaoshiai.cn/installer/install/helm"
 )
 
@@ -47,18 +48,30 @@ func NewDownloader(cacheDir string) *Downloader {
 
 // we cache "bundle" in a directory with name
 // "{repo host}/{name}-{version} or {repo host}/{name}-{version}.tgz" under cache directory
-func (d *Downloader) Download(ctx context.Context, repo, name, version, path string) (string, error) {
+func (d *Downloader) Download(ctx context.Context, instance install.Instance) (string, error) {
+	chart, repo, version, path := instance.Chart, instance.Repository, instance.Version, instance.Path
+
 	log := logr.FromContextOrDiscard(ctx)
-	if name == "" {
+	if chart == "" {
 		return "", errors.New("empty name")
 	}
 	if repo == "" {
-		return "", fmt.Errorf("no url specified for %s", name)
+		return "", fmt.Errorf("no url specified for %s", chart)
 	}
-	basename := name
+	basename := chart
 	if version != "" {
-		basename = name + "-" + version
+		basename = chart + "-" + version
 	}
+
+	// is file://
+	if path, ok := strings.CutPrefix(repo, "file://"); ok {
+		// check exist
+		if fi, err := os.Stat(path); err == nil && (fi.IsDir() || fi.Mode().IsRegular()) {
+			log.Info("using file path", "path", path)
+			return path, nil
+		}
+	}
+
 	// from cache
 	perRepoCacheDir := PerRepoCacheDir(repo, d.CacheDir)
 	if cachepath := foundInCache(ctx, perRepoCacheDir, basename); cachepath != "" {
@@ -66,15 +79,8 @@ func (d *Downloader) Download(ctx context.Context, repo, name, version, path str
 		return cachepath, nil
 	}
 
-	// is file://
-	if after, ok := strings.CutPrefix(repo, "file://"); ok {
-		if cachepath := foundInCache(ctx, after, basename); cachepath != "" {
-			log.Info("found in file protocol", "path", cachepath)
-			return cachepath, nil
-		}
-	}
-
 	cacheIn := filepath.Join(perRepoCacheDir, basename)
+
 	log.Info("downloading...", "cache", cacheIn)
 
 	// is git ?
@@ -90,7 +96,7 @@ func (d *Downloader) Download(ctx context.Context, repo, name, version, path str
 		return cacheIn, DownloadTgz(ctx, repo, path, cacheIn)
 	}
 	// is helm ? default helm
-	chartpath, _, err := helm.Download(ctx, repo, name, version, filepath.Dir(cacheIn))
+	chartpath, _, err := helm.Download(ctx, repo, chart, version, filepath.Dir(cacheIn))
 	if err != nil {
 		return chartpath, err
 	}

@@ -1,4 +1,6 @@
-apiVersion: v1
-description: A Helm chart for Kubernetes
-name: helm-test
-version: 1.0.0
+global:
+  imagePullSecrets: []
+  storageClass: standard
+
+foo:
+  enabled: true

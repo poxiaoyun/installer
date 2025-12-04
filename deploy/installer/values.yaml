@@ -20,7 +20,7 @@ diagnosticMode:
 
 installer:
   image:
-    registry: docker.io
+    registry: registry.cn-hangzhou.aliyuncs.com
     repository: xiaoshiai/installer
     tag: latest
     pullPolicy: IfNotPresent

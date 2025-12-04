@@ -31,6 +31,8 @@ type Options struct {
 	LeaderElection   bool   `json:"leaderElection,omitempty" description:"Enable leader election for controller manager."`
 	LeaderElectionID string `json:"leaderElectionID,omitempty" description:"The ID to use for leader election."`
 
+	SkipNameValidation bool `json:"skipNameValidation,omitempty" description:"Skip validation of controller name."`
+
 	CacheDir string `json:"cacheDir,omitempty" description:"The directory to cache downloaded bundle charts."`
 }
 

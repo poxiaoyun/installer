@@ -17,7 +17,7 @@ endif
 # semver version
 VERSION?=$(shell echo "${GIT_VERSION}" | sed -e 's/^v//')
 
-REGISTRY?=docker.io
+REGISTRY?=registry.cn-hangzhou.aliyuncs.com
 REPOSITORY?=xiaoshiai/installer
 IMAGE_TAG=${GIT_VERSION}
 # Image URL to use all building/pushing image targets
