@@ -5,7 +5,7 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 ## Installation
 
 ```sh
-kubectl create namespace installer
+kubectl create namespace rune-system
 kubectl apply -f install.yaml
 ```
 

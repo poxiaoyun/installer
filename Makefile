@@ -61,7 +61,7 @@ test:
 
 .PHONY: install.yaml
 install.yaml:
-	helm template installer --include-crds --namespace installer deploy/installer > install.yaml
+	helm template installer --include-crds --namespace rune-system deploy/installer > install.yaml
 
 release-image: build-binaries
 	docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE} --push -f Dockerfile ${BIN_DIR}

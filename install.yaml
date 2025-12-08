@@ -232,7 +232,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: installer
-  namespace: "installer"
+  namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
     helm.sh/chart: installer-0.0.0
@@ -245,7 +245,7 @@ kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: installer
-  namespace: "installer"
+  namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
     helm.sh/chart: installer-0.0.0
@@ -259,14 +259,14 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: installer
-    namespace: installer
+    namespace: rune-system
 ---
 # Source: installer/templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: installer
-  namespace: "installer"
+  namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
     helm.sh/chart: installer-0.0.0
@@ -295,8 +295,8 @@ spec:
       
       containers:
         - name: installer
-          image: ghcr.io/poxiaoyun/installer:main
-          imagePullPolicy: Always
+          image: registry.cn-hangzhou.aliyuncs.com/xiaoshiai/installer:main
+          imagePullPolicy: IfNotPresent
           args:
             - --leader-election
             - --probe-addr=:8080
@@ -306,8 +306,8 @@ spec:
               value: debug
           resources:
             limits:
-              cpu: 100m
-              memory: 128Mi
+              cpu: "1"
+              memory: 512Mi
             requests:
               cpu: 100m
               memory: 128Mi

@@ -22,7 +22,7 @@ installer:
   image:
     registry: registry.cn-hangzhou.aliyuncs.com
     repository: xiaoshiai/installer
-    tag: latest
+    tag: main
     pullPolicy: IfNotPresent
     pullSecrets: []
     debug: false
@@ -54,12 +54,12 @@ installer:
   customReadinessProbe: {}
   customStartupProbe: {}
   resources:
-    limits:
-      cpu: 100m
-      memory: 128Mi
     requests:
       cpu: 100m
       memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
   podSecurityContext:
     enabled: false
     fsGroup: 1001
