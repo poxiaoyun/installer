@@ -10,6 +10,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -57,6 +58,14 @@ func Run(ctx context.Context, options *Options) error {
 		Metrics:                server.Options{BindAddress: options.MetricsAddr},
 		LeaderElection:         options.LeaderElection,
 		LeaderElectionID:       options.LeaderElectionID,
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				// 对 Instance 资源禁用缓存，直接从 API Server 读取
+				DisableFor: []client.Object{
+					&appsv1.Instance{},
+				},
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")

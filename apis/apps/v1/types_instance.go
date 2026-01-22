@@ -11,7 +11,6 @@ import (
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="VERSION",type="string",JSONPath=".status.version",description="Chart version"
-// +kubebuilder:printcolumn:name="APP",type="string",JSONPath=".status.appVersion",description="App version",priority=1
 // +kubebuilder:printcolumn:name="PHASE",type="string",JSONPath=".status.phase",description="Current phase"
 // +kubebuilder:printcolumn:name="UPDATE",type="date",JSONPath=".status.upgradeTimestamp",description="Last upgrade",priority=1
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp",description="Creation time"
@@ -85,12 +84,24 @@ type ValuesFrom struct {
 }
 
 type InstanceStatus struct {
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// Phase is the current state of the release
 	Phase Phase `json:"phase,omitempty"`
 
 	// Message is the message associated with the status
-	// In helm, it's the notes contents.
+	// Contains error message when phase is Failed, cleared on success.
 	Message string `json:"message,omitempty"`
+
+	// Conditions represent the latest available observations of the instance's state.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
 	// Values is a nested map of final helm values.
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -156,7 +167,18 @@ const (
 )
 
 const (
-	PhaseDisabled  Phase = "Disabled"  // Instance is disabled. the .spce.disbaled field is set to true or DeletionTimestamp is set.
-	PhaseFailed    Phase = "Failed"    // Failed on install.
-	PhaseInstalled Phase = "Installed" // Instance is installed
+	PhaseInstalled Phase = "Installed" // Instance is successfully installed.
+	PhaseFailed    Phase = "Failed"    // Failed on install/upgrade/uninstall.
+)
+
+// Condition types for Instance
+const (
+	// ConditionReady indicates whether the instance is ready and fully operational.
+	ConditionReady = "Ready"
+	// ConditionDependenciesReady indicates whether all dependencies are ready.
+	ConditionDependenciesReady = "DependenciesReady"
+	// ConditionProgressing indicates whether the instance is currently being reconciled.
+	ConditionProgressing = "Progressing"
+	// ConditionReconciled indicates whether the instance has been successfully reconciled.
+	ConditionReconciled = "Reconciled"
 )

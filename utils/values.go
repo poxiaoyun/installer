@@ -1,10 +1,7 @@
 package utils
 
-import "reflect"
+import "k8s.io/apimachinery/pkg/api/equality"
 
 func EqualMapValues(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return reflect.DeepEqual(a, b)
+	return equality.Semantic.DeepEqual(a, b)
 }

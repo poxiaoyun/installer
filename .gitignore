@@ -12,3 +12,4 @@ _.yaml
 .cache
 *.tgz
 cover.out
+/*.test

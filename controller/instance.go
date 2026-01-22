@@ -4,14 +4,15 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"reflect"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	"helm.sh/helm/v3/pkg/strvals"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -89,25 +90,29 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	original := instance.DeepCopy()
 
+	// Always update observedGeneration at the start
+	instance.Status.ObservedGeneration = instance.Generation
+
 	// check the object is being deleted then remove the finalizer
 	if instance.DeletionTimestamp != nil {
 		// remove
 		if err := r.Remove(ctx, instance); err != nil {
+			instance.Status.Phase = appsv1.PhaseFailed
+			instance.Status.Message = err.Error()
+			r.setCondition(instance, appsv1.ConditionProgressing, metav1.ConditionFalse, "UninstallFailed", err.Error())
+			r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, "UninstallFailed", err.Error())
+			_ = r.Client.Status().Update(ctx, instance)
 			return ctrl.Result{}, err
 		}
+
+		// Remove finalizer after successful removal
 		if controllerutil.RemoveFinalizer(instance, FinalizerName) {
 			log.Info("remove finalizer")
 			if err := r.Client.Update(ctx, instance); err != nil {
 				return ctrl.Result{}, err
 			}
-			return ctrl.Result{}, nil
 		}
-		if reflect.DeepEqual(original.Status, instance.Status) {
-			return ctrl.Result{}, nil
-		}
-		if err := r.Client.Status().Update(ctx, instance); err != nil {
-			return ctrl.Result{}, err
-		}
+		return ctrl.Result{}, nil
 	}
 	if instance.DeletionTimestamp == nil && controllerutil.AddFinalizer(instance, FinalizerName) {
 		log.Info("add finalizer")
@@ -121,9 +126,11 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		instance.Status.Phase = appsv1.PhaseFailed
 		instance.Status.Message = err.Error()
+		r.setCondition(instance, appsv1.ConditionProgressing, metav1.ConditionFalse, "SyncFailed", err.Error())
+		r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, "SyncFailed", err.Error())
 	}
 	// update status if updated whenever the sync has error or not
-	if !reflect.DeepEqual(original.Status, instance.Status) {
+	if !equality.Semantic.DeepEqual(&original.Status, &instance.Status) {
 		if err := r.Client.Status().Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -133,10 +140,17 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance) error {
 	log := logr.FromContextOrDiscard(ctx)
+
 	// check all dependencies are installed
 	if err := r.checkDepenency(ctx, instance); err != nil {
+		instance.Status.Phase = appsv1.PhaseFailed
+		instance.Status.Message = err.Error()
+		r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionFalse, "DependencyNotReady", err.Error())
+		r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, "DependencyNotReady", err.Error())
 		return err
 	}
+	r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionTrue, "AllDependenciesReady", "All dependencies are installed")
+
 	// resolve valuesRef
 	values, err := r.resolveValues(ctx, instance)
 	if err != nil {
@@ -144,22 +158,30 @@ func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance
 	}
 	instanceSpec := installerInstanceFrom(instance, values)
 
-	// check upgrade
+	// check upgrade - determine if we need to apply
 	if instance.Status.Phase == appsv1.PhaseInstalled &&
-		instance.Spec.Version == instance.Status.Version &&
+		(instance.Spec.Version != "" && instance.Spec.Version == instance.Status.Version) &&
 		utils.EqualMapValues(instance.Status.Values.Object, values) {
 		log.Info("already uptodate")
+		r.setCondition(instance, appsv1.ConditionReconciled, metav1.ConditionTrue, "UpToDate", "Instance is up to date")
+		r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
 		return nil
 	}
+
 	log.Info("applying instance")
 	result, err := r.Applier.Apply(ctx, instanceSpec)
 	if err != nil {
 		log.Error(err, "apply instance")
+		instance.Status.Phase = appsv1.PhaseFailed
+		instance.Status.Message = err.Error()
+		r.setCondition(instance, appsv1.ConditionProgressing, metav1.ConditionFalse, "ApplyFailed", err.Error())
+		r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, "ApplyFailed", err.Error())
 		return err
 	}
+
 	log.Info("applied instance successfully")
 	instance.Status.Phase = appsv1.PhaseInstalled
-	instance.Status.Message = result.Note
+	instance.Status.Message = "" // Clear error message on success
 	instance.Status.Namespace = result.Namespace
 	instance.Status.CreationTimestamp = convtime(result.CreationTimestamp)
 	instance.Status.UpgradeTimestamp = convtime(result.UpgradeTimestamp)
@@ -167,7 +189,23 @@ func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance
 	instance.Status.Version = result.Version
 	instance.Status.AppVersion = result.AppVersion
 	instance.Status.Resources = result.Resources
+
+	r.setCondition(instance, appsv1.ConditionProgressing, metav1.ConditionFalse, "ApplySucceeded", "Release applied successfully")
+	r.setCondition(instance, appsv1.ConditionReconciled, metav1.ConditionTrue, "Reconciled", "Instance has been reconciled")
+	r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
+
 	return nil
+}
+
+// setCondition sets a condition on the instance status
+func (r *InstanceReconciler) setCondition(instance *appsv1.Instance, conditionType string, status metav1.ConditionStatus, reason, message string) {
+	meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		ObservedGeneration: instance.Generation,
+		Reason:             reason,
+		Message:            message,
+	})
 }
 
 func installerInstanceFrom(instance *appsv1.Instance, values map[string]any) install.Instance {
@@ -324,10 +362,6 @@ func (r *InstanceReconciler) Remove(ctx context.Context, instance *appsv1.Instan
 	log := logr.FromContextOrDiscard(ctx)
 
 	log.Info("removing instance")
-	if instance.Status.Phase == appsv1.PhaseDisabled {
-		log.Info("already removed or not installed")
-		return nil
-	}
 	instanceSpec := installerInstanceFrom(instance, instance.Spec.Values.Object)
 	return r.Applier.Remove(ctx, instanceSpec)
 }
