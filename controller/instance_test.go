@@ -180,7 +180,7 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 		readyCondition := meta.FindStatusCondition(plugin.Status.Conditions, appsv1.ConditionReady)
 		Expect(readyCondition).NotTo(BeNil())
 		Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
-		Expect(readyCondition.Reason).To(Equal("Installed"))
+		Expect(readyCondition.Reason).To(Equal("Ready"))
 
 		// Verify DependenciesReady condition
 		depsCondition := meta.FindStatusCondition(plugin.Status.Conditions, appsv1.ConditionDependenciesReady)
@@ -318,8 +318,6 @@ var _ = Describe("Phase status tests", func() {
 		// Verify all condition type constants exist
 		Expect(appsv1.ConditionReady).To(Equal("Ready"))
 		Expect(appsv1.ConditionDependenciesReady).To(Equal("DependenciesReady"))
-		Expect(appsv1.ConditionProgressing).To(Equal("Progressing"))
-		Expect(appsv1.ConditionReconciled).To(Equal("Reconciled"))
 	})
 })
 

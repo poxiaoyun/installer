@@ -141,8 +141,6 @@ spec:
                     name:
                       description: Name is the name of resource being referenced
                       type: string
-                    namespace:
-                      type: string
                     optional:
                       description: Optional set to true to ignore references not found
                         error
@@ -233,13 +231,38 @@ spec:
                   the instance.
                 format: date-time
                 type: string
+              endpoints:
+                description: Endpoints contains access endpoints extracted from Services
+                  and Ingresses
+                items:
+                  description: Endpoint represents an access endpoint for the instance
+                  properties:
+                    kind:
+                      description: Kind of endpoint, e.g. Cluster, Internal, External
+                      type: string
+                    name:
+                      type: string
+                    url:
+                      description: URL is the primary URL for this endpoint
+                      type: string
+                    urls:
+                      description: URLs is multiple URLs for this endpoint
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - kind
+                  - name
+                  - url
+                  type: object
+                type: array
               message:
                 description: |-
                   Message is the message associated with the status
                   Contains error message when phase is Failed, cleared on success.
                 type: string
-              namespace:
-                description: Namespace is the namespace where the instance is installed.
+              note:
+                description: Note contains the rendered notes from helm chart
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the most recent generation observed
@@ -264,6 +287,32 @@ spec:
                       type: string
                   type: object
                 type: array
+              states:
+                description: States contains the status of each workload component
+                  (Deployment, StatefulSet, etc.)
+                items:
+                  description: State represents the status of a workload component
+                  properties:
+                    kind:
+                      type: string
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    status:
+                      type: string
+                  required:
+                  - name
+                  - status
+                  type: object
+                type: array
+              summary:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Summary is computed from summary-expression annotation
+                  Used for displaying key business information in list views
+                type: object
               upgradeTimestamp:
                 description: UpgradeTimestamp is the time when the instance was last
                   upgraded.

@@ -45,6 +45,7 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 		Values:            applyedRelease.Config,
 		Version:           applyedRelease.Chart.Metadata.Version,
 		AppVersion:        applyedRelease.Chart.Metadata.AppVersion,
+		Resources:         ParseResourceReferences([]byte(applyedRelease.Manifest)),
 	}
 	return result, nil
 }

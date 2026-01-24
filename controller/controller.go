@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"go.uber.org/zap/zapcore"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -32,8 +33,6 @@ type Options struct {
 	LeaderElection   bool   `json:"leaderElection,omitempty" description:"Enable leader election for controller manager."`
 	LeaderElectionID string `json:"leaderElectionID,omitempty" description:"The ID to use for leader election."`
 
-	SkipNameValidation bool `json:"skipNameValidation,omitempty" description:"Skip validation of controller name."`
-
 	CacheDir string `json:"cacheDir,omitempty" description:"The directory to cache downloaded bundle charts."`
 }
 
@@ -49,7 +48,12 @@ func NewDefaultOptions() *Options {
 }
 
 func Run(ctx context.Context, options *Options) error {
-	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
+	log := zap.New(
+		zap.UseDevMode(true),
+		zap.StacktraceLevel(zapcore.FatalLevel),
+	)
+
+	ctrl.SetLogger(log)
 
 	setupLog := ctrl.Log.WithName("setup")
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -60,7 +64,6 @@ func Run(ctx context.Context, options *Options) error {
 		LeaderElectionID:       options.LeaderElectionID,
 		Client: client.Options{
 			Cache: &client.CacheOptions{
-				// 对 Instance 资源禁用缓存，直接从 API Server 读取
 				DisableFor: []client.Object{
 					&appsv1.Instance{},
 				},

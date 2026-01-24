@@ -25,7 +25,7 @@ type ReleaseManager struct {
 
 func NewHelmConfig(ctx context.Context, namespace string, cfg *rest.Config) (*action.Configuration, error) {
 	baselog := logr.FromContextOrDiscard(ctx)
-	logfunc := func(format string, v ...interface{}) {
+	logfunc := func(format string, v ...any) {
 		baselog.Info(fmt.Sprintf(format, v...))
 	}
 
@@ -57,7 +57,7 @@ func TemplateChart(ctx context.Context, rlsname, namespace string, chartPath str
 	return []byte(rls.Manifest), nil
 }
 
-func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, chartPath string, values map[string]interface{}) (*release.Release, error) {
+func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, chartPath string, values map[string]any) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	log.Info("loading chart")
 	loadedChart, err := loader.Load(chartPath)

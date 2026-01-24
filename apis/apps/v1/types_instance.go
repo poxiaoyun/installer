@@ -74,8 +74,6 @@ type ValuesFrom struct {
 	Kind string `json:"kind"`
 	// Name is the name of resource being referenced
 	Name string `json:"name"`
-	// +kubebuilder:validation:Optional
-	Namespace string `json:"namespace,omitempty"`
 	// An optional identifier to prepend to each key in the ConfigMap. Must be a C_IDENTIFIER.
 	// +kubebuilder:validation:Optional
 	Prefix string `json:"prefix,omitempty"`
@@ -94,6 +92,9 @@ type InstanceStatus struct {
 	// Message is the message associated with the status
 	// Contains error message when phase is Failed, cleared on success.
 	Message string `json:"message,omitempty"`
+
+	// Note contains the rendered notes from helm chart
+	Note string `json:"note,omitempty"`
 
 	// Conditions represent the latest available observations of the instance's state.
 	// +optional
@@ -114,9 +115,6 @@ type InstanceStatus struct {
 	// AppVersion is the app version of the instance.
 	AppVersion string `json:"appVersion,omitempty"`
 
-	// Namespace is the namespace where the instance is installed.
-	Namespace string `json:"namespace,omitempty"`
-
 	// CreationTimestamp is the first creation timestamp of the instance.
 	CreationTimestamp metav1.Time `json:"creationTimestamp,omitempty"`
 
@@ -125,6 +123,16 @@ type InstanceStatus struct {
 
 	// Resources is a list of resources created/managed by the instance.
 	Resources []ManagedResource `json:"resources,omitempty"`
+
+	// Endpoints contains access endpoints extracted from Services and Ingresses
+	Endpoints []Endpoint `json:"endpoints,omitempty"`
+
+	// States contains the status of each workload component (Deployment, StatefulSet, etc.)
+	States []State `json:"states,omitempty"`
+
+	// Summary is computed from summary-expression annotation
+	// Used for displaying key business information in list views
+	Summary map[string]string `json:"summary,omitempty"`
 }
 
 type ManagedResource struct {
@@ -167,18 +175,64 @@ const (
 )
 
 const (
-	PhaseInstalled Phase = "Installed" // Instance is successfully installed.
-	PhaseFailed    Phase = "Failed"    // Failed on install/upgrade/uninstall.
+	// Lifecycle Phases
+	PhaseReconciling Phase = "Reconciling" // Reconciling (Installing/Updating)
+	PhaseTerminating Phase = "Terminating" // Terminating
+	PhaseInstalled   Phase = "Installed"   // Installed (No workload)
+	PhaseFailed      Phase = "Failed"      // Failed (Installation failed or runtime failed)
+
+	// Control Phases
+	PhasePaused Phase = "Paused" // Paused
+
+	// Long-running Workload Phases (Deployment, StatefulSet, DaemonSet)
+	PhaseHealthy   Phase = "Healthy"   // Healthy (All components healthy)
+	PhaseDegraded  Phase = "Degraded"  // Degraded (Partial replicas available)
+	PhaseUnhealthy Phase = "Unhealthy" // Unhealthy
+
+	// Job Phases (Job, Pod)
+	PhasePending       Phase = "Pending"       // Pending (Waiting for scheduling)
+	PhaseRunning       Phase = "Running"       // Running
+	PhaseSucceeded     Phase = "Succeeded"     // Succeeded (All succeeded)
+	PhasePartialFailed Phase = "PartialFailed" // PartialFailed (Partially succeeded, partially failed)
+)
+
+// State represents the status of a workload component
+type State struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind,omitempty"` // Job, Deployment, StatefulSet, DaemonSet, Pod
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+// Endpoint represents an access endpoint for the instance
+type Endpoint struct {
+	Name string `json:"name"`
+	// URL is the primary URL for this endpoint
+	URL string `json:"url"`
+	// URLs is multiple URLs for this endpoint
+	URLs []string `json:"urls,omitempty"`
+	// Kind of endpoint, e.g. Cluster, Internal, External
+	Kind EndpointKind `json:"kind"`
+}
+
+// EndpointKind represents the accessibility level of an endpoint
+type EndpointKind string
+
+const (
+	// EndpointKindCluster means the endpoint is only accessible within the cluster
+	EndpointKindCluster EndpointKind = "Cluster"
+	// EndpointKindInternal means the endpoint is accessible within the intranet
+	EndpointKindInternal EndpointKind = "Internal"
+	// EndpointKindExternal means the endpoint is accessible publicly
+	EndpointKindExternal EndpointKind = "External"
 )
 
 // Condition types for Instance
 const (
-	// ConditionReady indicates whether the instance is ready and fully operational.
-	ConditionReady = "Ready"
 	// ConditionDependenciesReady indicates whether all dependencies are ready.
 	ConditionDependenciesReady = "DependenciesReady"
-	// ConditionProgressing indicates whether the instance is currently being reconciled.
-	ConditionProgressing = "Progressing"
-	// ConditionReconciled indicates whether the instance has been successfully reconciled.
-	ConditionReconciled = "Reconciled"
+	// ConditionInstalled indicates whether the instance has been successfully installed.
+	ConditionInstalled = "Installed"
+	// ConditionReady indicates whether the instance is ready and fully operational.
+	ConditionReady = "Ready"
 )
