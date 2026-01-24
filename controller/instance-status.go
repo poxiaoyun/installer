@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/go-logr/logr"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +35,11 @@ const (
 	StateStatusRunning   = "Running"
 )
 
+const (
+	AnnotationEndpointsExpression = "app.kubernetes.io/endpoints-expression"
+	AnnotationStatesExpression    = "app.kubernetes.io/states-expression"
+)
+
 const NodeIPPlaceholder = "{NodeIP}"
 
 func (r *InstanceReconciler) syncStatus(ctx context.Context, instance *appsv1.Instance) error {
@@ -49,8 +55,9 @@ func (r *InstanceReconciler) syncStatus(ctx context.Context, instance *appsv1.In
 		resources = append(resources, u)
 	}
 
-	instance.Status.Endpoints = GetDefaultEndpoints(resources)
-	instance.Status.States = GetDefaultStates(resources)
+	if err := checkAnnotations(ctx, instance, resources); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "check annotations failed")
+	}
 
 	paused := getmap(instance.Status.Values.Object, "global", "paused")
 	if paused == true || paused == "true" {
@@ -440,4 +447,105 @@ func PortProtocolFromServicePort(port corev1.ServicePort) string {
 		return "https"
 	}
 	return "tcp"
+}
+
+func checkAnnotations(ctx context.Context, instance *appsv1.Instance, resources []*unstructured.Unstructured) error {
+	annotations := instance.Annotations
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	resourceslist := make([]map[string]any, len(resources))
+	for idx, resource := range resources {
+		resourceslist[idx] = resource.Object
+	}
+	instancedata, err := runtime.DefaultUnstructuredConverter.ToUnstructured(instance)
+	if err != nil {
+		return err
+	}
+	// Convert instance.Values to map[string]any for CEL
+	// Use instance.Values (spec) as it contains the user-configured values
+	var valuesdata map[string]any
+	if instance.Status.Values.Object != nil {
+		valuesdata = instance.Status.Values.Object
+	}
+	celdata := CELData{
+		Instance:  instancedata,
+		Resources: resourceslist,
+		Values:    valuesdata,
+	}
+
+	if endpointsexpression := annotations[AnnotationEndpointsExpression]; endpointsexpression != "" {
+		instance.Status.Endpoints = checkEndpoints(ctx, endpointsexpression, celdata)
+	} else {
+		// default endpoints
+		instance.Status.Endpoints = GetDefaultEndpoints(resources)
+	}
+
+	if statusexpression := annotations[AnnotationStatesExpression]; statusexpression != "" {
+		instance.Status.States = checkStates(ctx, statusexpression, celdata)
+	} else {
+		// default workload state detection
+		instance.Status.States = GetDefaultStates(resources)
+	}
+
+	return nil
+}
+
+func checkStates(ctx context.Context, expr string, data CELData) []appsv1.State {
+	log := logr.FromContextOrDiscard(ctx)
+	result, err := EvalCELExpression(expr, data)
+	if err != nil {
+		log.Error(err, "evaluate status expression failed", "expression", expr)
+		return nil
+	}
+	states := []appsv1.State{}
+	if list, ok := result.([]any); ok {
+		for _, item := range list {
+			if m, ok := item.(map[string]any); ok {
+				state := appsv1.State{}
+				if name, ok := m["name"].(string); ok {
+					state.Name = name
+				}
+				if status, ok := m["status"].(string); ok {
+					state.Status = status
+				}
+				if message, ok := m["message"].(string); ok {
+					state.Message = message
+				}
+				states = append(states, state)
+			}
+		}
+		return states
+	}
+	log.Error(fmt.Errorf("expression result is not list"), "evaluate status expression failed", "expression", expr, "result", result)
+	return nil
+}
+
+func checkEndpoints(ctx context.Context, expr string, data CELData) []appsv1.Endpoint {
+	log := logr.FromContextOrDiscard(ctx)
+	result, err := EvalCELExpression(expr, data)
+	if err != nil {
+		log.Error(err, "evaluate endpoints expression failed", "expression", expr)
+		return nil
+	}
+	endpoints := []appsv1.Endpoint{}
+	if list, ok := result.([]any); ok {
+		for _, item := range list {
+			if m, ok := item.(map[string]any); ok {
+				endpoint := appsv1.Endpoint{}
+				if name, ok := m["name"].(string); ok {
+					endpoint.Name = name
+				}
+				if url, ok := m["url"].(string); ok {
+					endpoint.URL = url
+				}
+				if endpoint.URL != "" {
+					endpoints = append(endpoints, endpoint)
+				}
+			}
+		}
+		return endpoints
+	}
+	log.Error(fmt.Errorf("expression result is not list"), "evaluate endpoints expression failed", "expression", expr, "result", result)
+	return nil
 }
