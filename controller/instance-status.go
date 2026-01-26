@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
 
@@ -250,6 +251,8 @@ func GetDefaultStates(resources []*unstructured.Unstructured) []appsv1.State {
 			state = getDaemonSetState(resource)
 		case schema.GroupKind{Group: "core", Kind: "Pod"}:
 			state = getPodState(resource)
+		case schema.GroupKind{Group: apps.GroupName, Kind: "Instance"}:
+			state = getInstanceState(resource)
 		default:
 			continue
 		}
@@ -280,6 +283,16 @@ func getJobState(resource *unstructured.Unstructured) appsv1.State {
 		}
 	}
 	state.Status = StateStatusRunning
+	return state
+}
+
+func getInstanceState(resource *unstructured.Unstructured) appsv1.State {
+	instance := &appsv1.Instance{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, instance); err != nil {
+		return appsv1.State{}
+	}
+	state := appsv1.State{Name: instance.Name, Kind: "Instance"}
+	state.Status = string(instance.Status.Phase)
 	return state
 }
 
