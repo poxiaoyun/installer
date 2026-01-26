@@ -107,6 +107,28 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              extensions:
+                description: Extensions is a list of extensions to extend the sync/remove
+                  logic.
+                items:
+                  properties:
+                    kind:
+                      description: Kind is the kind of the extension.
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name is the name of the extension.
+                      type: string
+                    params:
+                      additionalProperties:
+                        type: string
+                      description: Params is the params of the extension.
+                      type: object
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               kind:
                 default: helm
                 description: Kind instance kind.
@@ -115,6 +137,23 @@ spec:
                 - kustomize
                 - template
                 type: string
+              options:
+                description: |-
+                  Options is a list of options to pass to the instance.
+                  if passed to helm or other deployer.
+                items:
+                  properties:
+                    name:
+                      description: Name is the name of the option.
+                      type: string
+                    value:
+                      description: Value is the value of the option.
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
               path:
                 description: Path is the path in a tarball to the chart/kustomize.
                 type: string

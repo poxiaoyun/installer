@@ -19,6 +19,19 @@ import (
 	"xiaoshiai.cn/installer/utils"
 )
 
+type Options struct {
+	Timeout         time.Duration
+	MaxHistory      int
+	ResetValues     bool
+	CreateNamespace bool
+	DisableHooks    bool
+	Wait            bool
+	WaitForJobs     bool
+	SubNotes        bool
+}
+
+const DefaultTimeout = 10 * time.Minute
+
 type ReleaseManager struct {
 	Config *rest.Config
 }
@@ -57,7 +70,7 @@ func TemplateChart(ctx context.Context, rlsname, namespace string, chartPath str
 	return []byte(rls.Manifest), nil
 }
 
-func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, chartPath string, values map[string]any) (*release.Release, error) {
+func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, chartPath string, values map[string]any, options Options) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	log.Info("loading chart")
 	loadedChart, err := loader.Load(chartPath)
@@ -77,7 +90,7 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 			return nil, err
 		}
 		// not install, install it now
-		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values)
+		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options)
 	}
 
 	// Handle pending/failed states that may block operations
@@ -88,7 +101,7 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 			return nil, fmt.Errorf("failed to recover from pending state: %w", err)
 		}
 		// After recovery, proceed with fresh install
-		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values)
+		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options)
 
 	case release.StatusUninstalling:
 		log.Info("release is uninstalling, waiting for completion")
@@ -108,11 +121,11 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 		return existRelease, nil
 	}
 	log.Info("upgrading", "old", existRelease.Config, "new", values)
-	return upgradeChart(ctx, helmcfg, loadedChart, rlsname, namespace, values)
+	return upgradeChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options)
 }
 
 // installChart performs a fresh helm install
-func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}) (*release.Release, error) {
+func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	log.Info("installing", "values", values)
 
@@ -120,20 +133,26 @@ func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChar
 	install.ReleaseName = rlsname
 	install.Namespace = namespace
 	install.CreateNamespace = true
-	install.Timeout = 10 * time.Minute
+	install.Timeout = Or(options.Timeout, DefaultTimeout)
+	install.DisableHooks = options.DisableHooks
+	install.Wait = options.Wait
+	install.SubNotes = options.SubNotes
 	return install.RunWithContext(ctx, loadedChart, values)
 }
 
 // upgradeChart performs a helm upgrade
-func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}) (*release.Release, error) {
+func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	log.Info("upgrading release")
 
 	upgrade := action.NewUpgrade(helmcfg)
 	upgrade.Namespace = namespace
 	upgrade.ResetValues = true
-	upgrade.MaxHistory = 5
-	upgrade.Timeout = 10 * time.Minute
+	upgrade.MaxHistory = Or(options.MaxHistory, 5)
+	upgrade.Timeout = Or(options.Timeout, DefaultTimeout)
+	upgrade.DisableHooks = options.DisableHooks
+	upgrade.Wait = options.Wait
+	upgrade.SubNotes = options.SubNotes
 
 	return upgrade.RunWithContext(ctx, rlsname, loadedChart, values)
 }
@@ -159,7 +178,7 @@ func equalMapValues(a, b map[string]any) bool {
 	return (len(a) == 0 && len(b) == 0) || reflect.DeepEqual(a, b)
 }
 
-func RemoveChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string) (*release.Release, error) {
+func RemoveChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, options Options) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	helmcfg, err := NewHelmConfig(ctx, namespace, cfg)
 	if err != nil {
@@ -174,7 +193,9 @@ func RemoveChart(ctx context.Context, cfg *rest.Config, rlsname, namespace strin
 	}
 
 	uninstall := action.NewUninstall(helmcfg)
-	uninstall.Timeout = 5 * time.Minute
+	uninstall.DisableHooks = options.DisableHooks
+	uninstall.Wait = options.Wait
+	uninstall.Timeout = Or(options.Timeout, DefaultTimeout)
 
 	// For pending states, disable hooks to force cleanup
 	if exist.Info.Status.IsPending() {
@@ -188,4 +209,12 @@ func RemoveChart(ctx context.Context, cfg *rest.Config, rlsname, namespace strin
 		return nil, err
 	}
 	return uninstalledRelease.Release, nil
+}
+
+func Or[T comparable](a, b T) T {
+	var zero T
+	if a == zero {
+		return b
+	}
+	return a
 }

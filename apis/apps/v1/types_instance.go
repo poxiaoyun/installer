@@ -61,12 +61,35 @@ type InstanceSpec struct {
 	// Ref can be a configmap or secret.
 	// +kubebuilder:validation:Optional
 	ValuesFrom []ValuesFrom `json:"valuesFrom,omitempty"`
+
+	// Options is a list of options to pass to the instance.
+	// if passed to helm or other deployer.
+	// +kubebuilder:validation:Optional
+	Options []Option `json:"options,omitempty"`
+
+	// Extensions is a list of extensions to extend the sync/remove logic.
+	// +kubebuilder:validation:Optional
+	Extensions []Extension `json:"extensions,omitempty"`
 }
 
-const (
-	ValuesFromKindConfigmap = "ConfigMap"
-	ValuesFromKindSecret    = "Secret"
-)
+type Option struct {
+	// Name is the name of the option.
+	Name string `json:"name"`
+	// Value is the value of the option.
+	Value string `json:"value"`
+}
+
+type Extension struct {
+	// Name is the name of the extension.
+	Name string `json:"name"`
+	// Kind is the kind of the extension.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+	// Params is the params of the extension.
+	// +kubebuilder:validation:Optional
+	Params map[string]string `json:"params,omitempty"`
+}
 
 type ValuesFrom struct {
 	// Kind is the type of resource being referenced

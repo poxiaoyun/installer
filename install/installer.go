@@ -26,7 +26,11 @@ type Instance struct {
 	Resources         []ManagedResource
 	CreationTimestamp time.Time
 	UpgradeTimestamp  time.Time
+
+	Options []Option
 }
+
+type Option = appsv1.Option
 
 type InstanceStatus struct {
 	Note              string

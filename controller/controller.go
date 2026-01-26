@@ -34,6 +34,8 @@ type Options struct {
 	LeaderElectionID string `json:"leaderElectionID,omitempty" description:"The ID to use for leader election."`
 
 	CacheDir string `json:"cacheDir,omitempty" description:"The directory to cache downloaded bundle charts."`
+
+	Concurrency int `json:"concurrency,omitempty" description:"The number of concurrent reconciles for each controller."`
 }
 
 func NewDefaultOptions() *Options {
@@ -44,6 +46,7 @@ func NewDefaultOptions() *Options {
 		LeaderElection:   false,
 		LeaderElectionID: "installer-leader-election",
 		CacheDir:         filepath.Join(home, ".cache", "installer"),
+		Concurrency:      5,
 	}
 }
 

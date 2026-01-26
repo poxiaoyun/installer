@@ -21,17 +21,23 @@ import (
 )
 
 const (
-	StateStatusPending  = "Pending"
 	StateStatusDegraded = "Degraded"
 	StateStatusUpdating = "Updating"
 	StateStatusScaling  = "Scaling"
 
+	StateStatusPaused  = "Paused"
+	StateStatusUnknown = "Unknown"
+
+	StateStatusPending          = "Pending"
 	StateStatusCrashLoopBackOff = "CrashLoopBackOff"
-	StateStatusUnknown          = "Unknown"
 	StateStatusFailed           = "Failed"
+	StateStatusUnhealthy        = "Unhealthy"
 	StateStatusError            = "Error"
 
 	StateStatusSucceeded = "Succeeded"
+	StateStatusActive    = "Active"
+	StateStatusHealthy   = "Healthy"
+	StateCompleted       = "Completed"
 	StateStatusRunning   = "Running"
 )
 
@@ -91,7 +97,8 @@ func computeJobPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 	hasPending := false
 	for _, s := range states {
 		switch s.Status {
-		case StateStatusFailed:
+		case StateStatusFailed,
+			StateStatusError:
 			hasFailed = true
 		case StateStatusSucceeded:
 			hasSucceeded = true
@@ -120,27 +127,27 @@ func computeJobPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 }
 
 func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
-	hasFailed := false
+	hasUnhealthy := false
 	hasDegraded := false
-	hasPending := false
 	for _, s := range states {
 		switch s.Status {
-		case StateStatusFailed, StateStatusError, StateStatusCrashLoopBackOff:
-			hasFailed = true
-		case StateStatusDegraded, StateStatusUpdating, StateStatusScaling:
+		case StateStatusFailed,
+			StateStatusError,
+			StateStatusCrashLoopBackOff,
+			StateStatusPending,
+			StateStatusUnhealthy:
+			hasUnhealthy = true
+		case StateStatusDegraded,
+			StateStatusUpdating,
+			StateStatusScaling:
 			hasDegraded = true
-		case StateStatusPending:
-			hasPending = true
 		}
 	}
-	if hasFailed {
-		return appsv1.PhaseFailed, false, getUnhealthyMessage(states)
+	if hasUnhealthy {
+		return appsv1.PhaseUnhealthy, false, getUnhealthyMessage(states)
 	}
 	if hasDegraded {
 		return appsv1.PhaseDegraded, false, getUnhealthyMessage(states)
-	}
-	if hasPending {
-		return appsv1.PhaseUnhealthy, false, getUnhealthyMessage(states)
 	}
 	return appsv1.PhaseHealthy, true, ""
 }
@@ -258,6 +265,10 @@ func getJobState(resource *unstructured.Unstructured) appsv1.State {
 	}
 	state := appsv1.State{Name: job.Name, Kind: "Job"}
 	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobSuspended && c.Status == corev1.ConditionTrue {
+			state.Status = StateStatusPaused
+			return state
+		}
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
 			state.Status = StateStatusSucceeded
 			return state
@@ -277,11 +288,22 @@ func getDeploymentState(resource *unstructured.Unstructured) appsv1.State {
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, deployment); err != nil {
 		return appsv1.State{}
 	}
-	state := appsv1.State{Name: deployment.Name, Kind: "Deployment"}
-	if deployment.Status.ReadyReplicas == deployment.Status.Replicas {
-		state.Status = StateStatusRunning
-	} else {
-		state.Status = StateStatusDegraded
+	state := appsv1.State{
+		Name:   deployment.Name,
+		Kind:   "Deployment",
+		Status: calcReplicasState(deployment.Status.Replicas, deployment.Status.ReadyReplicas),
+	}
+	messages := []string{}
+	for _, c := range deployment.Status.Conditions {
+		if c.Type == k8sappsv1.DeploymentAvailable && c.Status == corev1.ConditionFalse {
+			messages = append(messages, c.Message)
+		}
+		if c.Type == k8sappsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+			messages = append(messages, c.Message)
+		}
+	}
+	if len(messages) > 0 {
+		state.Message = strings.Join(messages, "\n")
 	}
 	return state
 }
@@ -291,13 +313,25 @@ func getStatefulSetState(resource *unstructured.Unstructured) appsv1.State {
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, statefulset); err != nil {
 		return appsv1.State{}
 	}
-	state := appsv1.State{Name: statefulset.Name, Kind: "StatefulSet"}
-	if statefulset.Status.ReadyReplicas == statefulset.Status.Replicas {
-		state.Status = StateStatusRunning
-	} else {
-		state.Status = StateStatusDegraded
+	state := appsv1.State{
+		Name:   statefulset.Name,
+		Kind:   "StatefulSet",
+		Status: calcReplicasState(statefulset.Status.Replicas, statefulset.Status.ReadyReplicas),
 	}
 	return state
+}
+
+func calcReplicasState(desired int32, ready int32) string {
+	if desired == 0 {
+		return StateStatusPaused
+	}
+	if ready == desired {
+		return StateStatusRunning
+	}
+	if ready == 0 {
+		return StateStatusUnhealthy
+	}
+	return StateStatusDegraded
 }
 
 func getDaemonSetState(resource *unstructured.Unstructured) appsv1.State {
@@ -305,13 +339,11 @@ func getDaemonSetState(resource *unstructured.Unstructured) appsv1.State {
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, daemonset); err != nil {
 		return appsv1.State{}
 	}
-	state := appsv1.State{Name: daemonset.Name, Kind: "DaemonSet"}
-	if daemonset.Status.NumberReady == daemonset.Status.DesiredNumberScheduled {
-		state.Status = StateStatusRunning
-	} else {
-		state.Status = StateStatusDegraded
+	return appsv1.State{
+		Name:   daemonset.Name,
+		Kind:   "DaemonSet",
+		Status: calcReplicasState(daemonset.Status.DesiredNumberScheduled, daemonset.Status.NumberReady),
 	}
-	return state
 }
 
 func getPodState(resource *unstructured.Unstructured) appsv1.State {

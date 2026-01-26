@@ -3,6 +3,8 @@ package helm
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/go-logr/logr"
 	"helm.sh/helm/v3/pkg/release"
@@ -30,7 +32,13 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 	log := logr.FromContextOrDiscard(ctx)
 
 	log.Info("applying chart", "path", instance.Location)
-	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, instance.Location, instance.Values)
+
+	options, err := ParseOptions(instance.Options)
+	if err != nil {
+		return nil, fmt.Errorf("parse options: %w", err)
+	}
+
+	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, instance.Location, instance.Values, options)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +58,53 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 	return result, nil
 }
 
+func ParseOptions(options []install.Option) (Options, error) {
+	option := Options{}
+	for _, opt := range options {
+		switch opt.Name {
+		case "timeout":
+			dur, err := time.ParseDuration(opt.Value)
+			if err != nil {
+				return option, fmt.Errorf("parse timeout: %w", err)
+			}
+			option.Timeout = dur
+		case "maxHistory":
+			i, err := strconv.Atoi(opt.Value)
+			if err != nil {
+				return option, fmt.Errorf("parse maxHistory: %w", err)
+			}
+			option.MaxHistory = i
+		case "disableHooks":
+			b, err := strconv.ParseBool(opt.Value)
+			if err != nil {
+				return option, fmt.Errorf("parse disableHooks: %w", err)
+			}
+			option.DisableHooks = b
+		case "wait":
+			b, err := strconv.ParseBool(opt.Value)
+			if err != nil {
+				return option, fmt.Errorf("parse wait: %w", err)
+			}
+			option.Wait = b
+		case "waitForJobs":
+			b, err := strconv.ParseBool(opt.Value)
+			if err != nil {
+				return option, fmt.Errorf("parse waitForJobs: %w", err)
+			}
+			option.WaitForJobs = b
+		case "subNotes":
+			b, err := strconv.ParseBool(opt.Value)
+			if err != nil {
+				return option, fmt.Errorf("parse subNotes: %w", err)
+			}
+			option.SubNotes = b
+		default:
+			return option, fmt.Errorf("unknown option: %s", opt.Name)
+		}
+	}
+	return option, nil
+}
+
 func ParseResourceReferences(resources []byte) []appsv1.ManagedResource {
 	ress, _ := utils.SplitYAML(resources)
 	managedResources := make([]appsv1.ManagedResource, len(ress))
@@ -66,8 +121,12 @@ type RemoveOptions struct {
 func (r *Apply) Remove(ctx context.Context, instance install.Instance) error {
 	log := logr.FromContextOrDiscard(ctx)
 
+	options, err := ParseOptions(instance.Options)
+	if err != nil {
+		return err
+	}
 	// uninstall
-	removedRelease, err := RemoveChart(ctx, r.Config, instance.Name, instance.Namespace)
+	removedRelease, err := RemoveChart(ctx, r.Config, instance.Name, instance.Namespace, options)
 	if err != nil {
 		return err
 	}

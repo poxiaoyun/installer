@@ -31,8 +31,6 @@ import (
 	"xiaoshiai.cn/installer/utils"
 )
 
-const MaxConcurrentReconciles = 1
-
 const (
 	FinalizerName = apps.GroupName + "/finalizer"
 )
@@ -47,7 +45,7 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.Instance{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: MaxConcurrentReconciles}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: options.Concurrency}).
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &corev1.ConfigMap{}, ValueFromEventHandler[*corev1.ConfigMap](cli)),
 		).
@@ -194,7 +192,7 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 	instanceSpec := installerInstanceFrom(instance, values)
 
 	if meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) &&
-		(instance.Spec.Version != "" && instance.Spec.Version == instance.Status.Version) &&
+		(instance.Spec.Version == "" || instance.Spec.Version == instance.Status.Version) &&
 		utils.EqualMapValues(instance.Status.Values.Object, values) {
 		log.Info("already uptodate")
 		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
@@ -246,6 +244,7 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any) ins
 		Resources:         instance.Status.Resources,
 		CreationTimestamp: instance.Status.CreationTimestamp.Time,
 		UpgradeTimestamp:  instance.Status.UpgradeTimestamp.Time,
+		Options:           instance.Spec.Options,
 	}
 }
 
@@ -406,6 +405,14 @@ func (r *InstanceReconciler) syncWatches(ctx context.Context, instance *appsv1.I
 
 func (r *InstanceReconciler) Remove(ctx context.Context, instance *appsv1.Instance) error {
 	log := logr.FromContextOrDiscard(ctx)
+
+	if instance.Status.Phase != appsv1.PhaseTerminating {
+		instance.Status.Phase = appsv1.PhaseTerminating
+		instance.Status.Message = ""
+		if err := r.Client.Status().Update(ctx, instance); err != nil {
+			return err
+		}
+	}
 
 	log.Info("removing instance")
 	instanceSpec := installerInstanceFrom(instance, instance.Spec.Values.Object)
