@@ -355,6 +355,8 @@ func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1
 
 	// inlined values
 	base = mergeMaps(base, instance.Spec.Values.Object)
+	// clean nil values
+	base = cleanNilValues(base)
 	return base, nil
 }
 
@@ -380,6 +382,19 @@ func mergeInto(k, v string, base map[string]any) error {
 		return fmt.Errorf("parse %#v key[%s]: %w", k, v, err)
 	}
 	return nil
+}
+
+func cleanNilValues(m map[string]any) map[string]any {
+	for k, v := range m {
+		if v == nil {
+			delete(m, k)
+			continue
+		}
+		if nm, ok := v.(map[string]any); ok {
+			cleanNilValues(nm)
+		}
+	}
+	return m
 }
 
 func (r *InstanceReconciler) syncWatches(ctx context.Context, instance *appsv1.Instance) error {
