@@ -12,7 +12,8 @@ import (
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="VERSION",type="string",JSONPath=".status.version",description="Chart version"
 // +kubebuilder:printcolumn:name="PHASE",type="string",JSONPath=".status.phase",description="Current phase"
-// +kubebuilder:printcolumn:name="UPDATE",type="date",JSONPath=".status.upgradeTimestamp",description="Last upgrade",priority=1
+// +kubebuilder:printcolumn:name="APPVERSION",type="string",JSONPath=".status.appVersion",description="App version",priority=1
+// +kubebuilder:printcolumn:name="UPDATE",type="date",JSONPath=".status.upgradeTimestamp",description="Last upgrade"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp",description="Creation time"
 type Instance struct {
 	metav1.TypeMeta   `json:",inline"`
