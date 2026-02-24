@@ -16,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
@@ -45,6 +45,7 @@ const (
 const (
 	AnnotationEndpointsExpression = "app.kubernetes.io/endpoints-expression"
 	AnnotationStatesExpression    = "app.kubernetes.io/states-expression"
+	AnnotationSummaryExpression   = "app.kubernetes.io/summary-expression"
 )
 
 const NodeIPPlaceholder = "{NodeIP}"
@@ -533,6 +534,10 @@ func checkAnnotations(ctx context.Context, instance *appsv1.Instance, resources 
 		instance.Status.States = GetDefaultStates(resources)
 	}
 
+	if summaryexpression := annotations[AnnotationSummaryExpression]; summaryexpression != "" {
+		instance.Status.Summary = checkSummary(ctx, summaryexpression, celdata)
+	}
+
 	return nil
 }
 
@@ -592,5 +597,28 @@ func checkEndpoints(ctx context.Context, expr string, data CELData) []appsv1.End
 		return endpoints
 	}
 	log.Error(fmt.Errorf("expression result is not list"), "evaluate endpoints expression failed", "expression", expr, "result", result)
+	return nil
+}
+
+func checkSummary(ctx context.Context, expr string, data CELData) map[string]string {
+	log := log.FromContext(ctx)
+	result, err := EvalCELExpression(expr, data)
+	if err != nil {
+		log.Error(err, "evaluate summary expression failed", "expression", expr)
+		return nil
+	}
+	summary := map[string]string{}
+	if m, ok := result.(map[string]any); ok {
+		for key, value := range m {
+			switch v := value.(type) {
+			case string:
+				summary[key] = v
+			default:
+				summary[key] = fmt.Sprintf("%v", v)
+			}
+		}
+		return summary
+	}
+	log.Error(fmt.Errorf("expression result is not map"), "evaluate summary expression failed", "expression", expr, "result", result)
 	return nil
 }
