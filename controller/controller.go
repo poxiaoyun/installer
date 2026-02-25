@@ -91,6 +91,7 @@ func Run(ctx context.Context, options *Options) error {
 	// setup controllers
 	if err := Setup(ctx, mgr, options); err != nil {
 		setupLog.Error(err, "unable to set up helm controller")
+		return err
 	}
 
 	setupLog.Info("starting manager")
