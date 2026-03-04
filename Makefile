@@ -68,7 +68,7 @@ build-helm:
 	helm package deploy/installer --version=${VERSION} --app-version=${GIT_VERSION} --destination ${BIN_DIR}
 
 
-HELM_OCI_REGISTRY?=registry.xiaoshiai.cn/charts
+HELM_OCI_REGISTRY?=registry.xiaoshiai.cn
 .PHONY: release-helm
 release-helm: build-helm ## Release helm chart.
 	helm push ${BIN_DIR}/installer-${VERSION}.tgz oci://${HELM_OCI_REGISTRY}/charts
