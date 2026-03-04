@@ -17,11 +17,7 @@ endif
 # semver version
 VERSION?=$(shell echo "${GIT_VERSION}" | sed -e 's/^v//')
 
-REGISTRY?=registry.cn-hangzhou.aliyuncs.com
-REPOSITORY?=xiaoshiai/installer
-IMAGE_TAG=${GIT_VERSION}
-# Image URL to use all building/pushing image targets
-IMAGE ?=  ${REGISTRY}/${REPOSITORY}:$(IMAGE_TAG)
+IMAGE_REGISTRY?=registry.cn-hangzhou.aliyuncs.com
 
 GOPACKAGE=$(shell go list -m)
 ldflags+=-w -s
@@ -64,7 +60,22 @@ install.yaml:
 	helm template installer --include-crds --namespace rune-system deploy/installer > install.yaml
 
 release-image: build-binaries
-	docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE} --push -f Dockerfile ${BIN_DIR}
+	docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE_REGISTRY}/xiaoshiai/installer:${GIT_VERSION} --push -f Dockerfile ${BIN_DIR}
+
+
+build-helm:
+	helm dependency build deploy/installer
+	helm package deploy/installer --version=${VERSION} --app-version=${GIT_VERSION} --destination ${BIN_DIR}
+
+
+HELM_OCI_REGISTRY?=registry.xiaoshiai.cn/charts
+.PHONY: release-helm
+release-helm: build-helm ## Release helm chart.
+	helm push ${BIN_DIR}/installer-${VERSION}.tgz oci://${HELM_OCI_REGISTRY}/charts
+
+login:
+	docker login ${IMAGE_REGISTRY} -u ${REGISTRY_USERNAME} -p ${REGISTRY_PASSWORD}
+	helm registry login ${HELM_OCI_REGISTRY} -u ${REGISTRY_USERNAME} -p ${REGISTRY_PASSWORD}
 
 CONTROLLER_GEN = ${BIN_DIR}/controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
