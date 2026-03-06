@@ -11,7 +11,7 @@ If release name contains chart name it will be used as a full name.
 Return the proper bundle image name
 */}}
 {{- define "installer.image" -}}
-{{ include "common.images.image" (dict "imageRoot" .Values.installer.image "global" .Values.global) }}
+{{ include "common.images.image" (dict "imageRoot" .Values.installer.image "global" .Values.global "chart" .Chart) }}
 {{- end -}}
 
 
@@ -19,7 +19,7 @@ Return the proper bundle image name
 Return the proper Docker Image Registry Secret Names
 */}}
 {{- define "installer.imagePullSecrets" -}}
-{{- include "common.images.pullSecrets" (dict "images" (list .Values.installer.image ) "global" .Values.global) -}}
+{{- include "common.images.renderPullSecrets" (dict "images" (list .Values.installer.image) "context" .) -}}
 {{- end -}}
 
 {{/*

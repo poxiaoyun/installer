@@ -22,7 +22,7 @@ installer:
   image:
     registry: registry.cn-hangzhou.aliyuncs.com
     repository: xiaoshiai/installer
-    tag: main
+    tag: "" # keep empty to use the appVersion from Chart.yaml
     pullPolicy: IfNotPresent
     pullSecrets: []
     debug: false
