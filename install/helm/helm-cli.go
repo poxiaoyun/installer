@@ -2,8 +2,10 @@ package helm
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -136,10 +138,16 @@ func downloadChart(ctx context.Context, repourl, name, version string) (string, 
 	// nolint nestif
 	if repourl != "" {
 		if registry.IsOCI(repourl) {
+			insecureHTTPClient := &http.Client{
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				},
+			}
 			registryClient, err := registry.NewClient(
 				registry.ClientOptDebug(settings.Debug),
 				registry.ClientOptWriter(os.Stderr),
 				registry.ClientOptCredentialsFile(settings.RegistryConfig),
+				registry.ClientOptHTTPClient(insecureHTTPClient),
 			)
 			if err != nil {
 				return "", err
