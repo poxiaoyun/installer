@@ -72,11 +72,13 @@ func (d *Downloader) Download(ctx context.Context, instance install.Instance) (s
 		}
 	}
 
-	// from cache
+	// from cache (skip cache when version is empty to always fetch latest)
 	perRepoCacheDir := PerRepoCacheDir(repo, d.CacheDir)
-	if cachepath := foundInCache(ctx, perRepoCacheDir, basename); cachepath != "" {
-		log.Info("found in cache", "path", cachepath)
-		return cachepath, nil
+	if version != "" {
+		if cachepath := foundInCache(ctx, perRepoCacheDir, basename); cachepath != "" {
+			log.Info("found in cache", "path", cachepath)
+			return cachepath, nil
+		}
 	}
 
 	cacheIn := filepath.Join(perRepoCacheDir, basename)
