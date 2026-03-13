@@ -123,7 +123,7 @@ func LocateChartSuper(ctx context.Context, repoURL, name, version string) (strin
 	return repou.ResolveReference(downloadu).Path, nil
 }
 
-func downloadChart(ctx context.Context, repourl, name, version string) (string, error) {
+func downloadChart(_ context.Context, repourl, name, version string) (string, error) {
 	settings := cli.New()
 	dl := downloader.ChartDownloader{
 		Out:              os.Stdout,
@@ -180,5 +180,5 @@ func downloadChart(ctx context.Context, repourl, name, version string) (string, 
 }
 
 func InstallerUserAgent() string {
-	return "installer/" + strings.TrimPrefix(version.Get().GitVersion, "v")
+	return "installer/" + version.Get().GitVersion
 }

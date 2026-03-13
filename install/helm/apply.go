@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/release"
 	"k8s.io/client-go/rest"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
@@ -38,14 +39,22 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 		return nil, fmt.Errorf("parse options: %w", err)
 	}
 
-	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, instance.Location, instance.Values, options)
+	// Load chart once for both ApplyChart and dashboard injection
+	loadedChart, err := loader.Load(instance.Location)
+	if err != nil {
+		return nil, fmt.Errorf("load chart: %w", err)
+	}
+
+	helmPR := NewHelmPostRenderer(instance.PostRenderer, loadedChart)
+
+	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, loadedChart, instance.Values, options, helmPR)
 	if err != nil {
 		return nil, err
 	}
 	if applyedRelease.Info.Status != release.StatusDeployed {
 		return nil, fmt.Errorf("apply not finished:%s", applyedRelease.Info.Description)
 	}
-	result := &install.InstanceStatus{
+	return &install.InstanceStatus{
 		Note:              applyedRelease.Info.Notes,
 		Namespace:         applyedRelease.Namespace,
 		CreationTimestamp: applyedRelease.Info.FirstDeployed.Time,
@@ -54,8 +63,8 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 		Version:           applyedRelease.Chart.Metadata.Version,
 		AppVersion:        applyedRelease.Chart.Metadata.AppVersion,
 		Resources:         ParseResourceReferences([]byte(applyedRelease.Manifest)),
-	}
-	return result, nil
+		ChartAnnotations:  applyedRelease.Chart.Metadata.Annotations,
+	}, nil
 }
 
 func ParseOptions(options []install.Option) (Options, error) {

@@ -36,6 +36,11 @@ type Options struct {
 	CacheDir string `json:"cacheDir,omitempty" description:"The directory to cache downloaded bundle charts."`
 
 	Concurrency int `json:"concurrency,omitempty" description:"The number of concurrent reconciles for each controller."`
+
+	// AllowClusterScopedNamespaces is a list of namespaces whose instances are always allowed
+	// to create cluster-scoped resources. Namespaces not in this list can still be allowed
+	// via the "installer.xiaoshiai.cn/allow-cluster-scoped" annotation on the Namespace.
+	AllowClusterScopedNamespaces []string `json:"allowClusterScopedNamespaces,omitempty" description:"Namespaces allowed to create cluster-scoped resources."`
 }
 
 func NewDefaultOptions() *Options {
@@ -47,6 +52,10 @@ func NewDefaultOptions() *Options {
 		LeaderElectionID: "installer-leader-election",
 		CacheDir:         filepath.Join(home, ".cache", "installer"),
 		Concurrency:      5,
+		AllowClusterScopedNamespaces: []string{
+			"rune-system",
+			"kube-system",
+		},
 	}
 }
 

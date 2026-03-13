@@ -157,6 +157,10 @@ type InstanceStatus struct {
 	// Summary is computed from summary-expression annotation
 	// Used for displaying key business information in list views
 	Summary map[string]string `json:"summary,omitempty"`
+
+	// Extensions is the list of extensions that were applied during the last sync.
+	// Used to detect extension changes that require re-apply.
+	Extensions []Extension `json:"extensions,omitempty"`
 }
 
 type ManagedResource struct {

@@ -1,6 +1,7 @@
 package helm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,10 +13,12 @@ import (
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/kube"
+	"helm.sh/helm/v3/pkg/postrender"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage/driver"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
+	"xiaoshiai.cn/installer/install"
 	"xiaoshiai.cn/installer/utils"
 )
 
@@ -30,7 +33,10 @@ type Options struct {
 	SubNotes        bool
 }
 
-const DefaultTimeout = 10 * time.Minute
+const (
+	DefaultTimeout  = 10 * time.Minute
+	MaxHistoryLimit = 3
+)
 
 type ReleaseManager struct {
 	Config *rest.Config
@@ -70,13 +76,8 @@ func TemplateChart(ctx context.Context, rlsname, namespace string, chartPath str
 	return []byte(rls.Manifest), nil
 }
 
-func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, chartPath string, values map[string]any, options Options) (*release.Release, error) {
+func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, loadedChart *chart.Chart, values map[string]any, options Options, pr postrender.PostRenderer) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
-	log.Info("loading chart")
-	loadedChart, err := loader.Load(chartPath)
-	if err != nil {
-		return nil, fmt.Errorf("load chart: %w", err)
-	}
 	if rlsname == "" {
 		rlsname = loadedChart.Name()
 	}
@@ -90,7 +91,7 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 			return nil, err
 		}
 		// not install, install it now
-		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options)
+		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr)
 	}
 
 	// Handle pending/failed states that may block operations
@@ -101,7 +102,7 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 			return nil, fmt.Errorf("failed to recover from pending state: %w", err)
 		}
 		// After recovery, proceed with fresh install
-		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options)
+		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr)
 
 	case release.StatusUninstalling:
 		log.Info("release is uninstalling, waiting for completion")
@@ -121,11 +122,11 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 		return existRelease, nil
 	}
 	log.Info("upgrading", "old", existRelease.Config, "new", values)
-	return upgradeChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options)
+	return upgradeChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr)
 }
 
 // installChart performs a fresh helm install
-func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options) (*release.Release, error) {
+func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options, pr postrender.PostRenderer) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	log.Info("installing", "values", values)
 
@@ -137,23 +138,24 @@ func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChar
 	install.DisableHooks = options.DisableHooks
 	install.Wait = options.Wait
 	install.SubNotes = options.SubNotes
+	install.PostRenderer = pr
 	return install.RunWithContext(ctx, loadedChart, values)
 }
 
 // upgradeChart performs a helm upgrade
-func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options) (*release.Release, error) {
+func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options, pr postrender.PostRenderer) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	log.Info("upgrading release")
 
 	upgrade := action.NewUpgrade(helmcfg)
 	upgrade.Namespace = namespace
 	upgrade.ResetValues = true
-	upgrade.MaxHistory = Or(options.MaxHistory, 5)
+	upgrade.MaxHistory = Or(options.MaxHistory, MaxHistoryLimit)
 	upgrade.Timeout = Or(options.Timeout, DefaultTimeout)
 	upgrade.DisableHooks = options.DisableHooks
 	upgrade.Wait = options.Wait
 	upgrade.SubNotes = options.SubNotes
-
+	upgrade.PostRenderer = pr
 	return upgrade.RunWithContext(ctx, rlsname, loadedChart, values)
 }
 
@@ -217,4 +219,22 @@ func Or[T comparable](a, b T) T {
 		return b
 	}
 	return a
+}
+
+// NewHelmPostRenderer adapts an install.PostRenderer to Helm's
+// postrender.PostRenderer by binding the chart.
+func NewHelmPostRenderer(renderer install.PostRenderer, ch *chart.Chart) postrender.PostRenderer {
+	if renderer == nil {
+		return nil
+	}
+	return &helmPostRendererAdapter{renderer: renderer, chart: ch}
+}
+
+type helmPostRendererAdapter struct {
+	renderer install.PostRenderer
+	chart    *chart.Chart
+}
+
+func (a *helmPostRendererAdapter) Run(in *bytes.Buffer) (*bytes.Buffer, error) {
+	return a.renderer.Run(in, a.chart)
 }

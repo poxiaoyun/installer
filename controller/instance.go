@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"reflect"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/yaml"
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
+	"xiaoshiai.cn/installer/controller/postrender"
 	"xiaoshiai.cn/installer/install"
 	"xiaoshiai.cn/installer/install/delegate"
 	"xiaoshiai.cn/installer/utils"
@@ -33,34 +35,45 @@ import (
 
 const (
 	FinalizerName = apps.GroupName + "/finalizer"
+
+	// AnnotationAllowClusterScoped is a namespace annotation that, when set to "true",
+	// allows instances in that namespace to create cluster-scoped resources.
+	AnnotationAllowClusterScoped = apps.GroupName + "/allow-cluster-scoped"
 )
 
 func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	cfg, cli := mgr.GetConfig(), mgr.GetClient()
+	allowNS := make(map[string]struct{}, len(options.AllowClusterScopedNamespaces))
+	for _, ns := range options.AllowClusterScopedNamespaces {
+		allowNS[ns] = struct{}{}
+	}
 	r := &InstanceReconciler{
-		Client:         cli,
-		Scheme:         mgr.GetScheme(),
-		Applier:        delegate.NewDelegate(cfg, cli, &delegate.Options{CacheDir: options.CacheDir}),
-		DynamicSources: NewDynamicSources(mgr.GetCache()),
+		Client:                       cli,
+		Scheme:                       mgr.GetScheme(),
+		Applier:                      delegate.NewDelegate(cfg, cli, &delegate.Options{CacheDir: options.CacheDir}),
+		DynamicSources:               NewDynamicSources(mgr.GetCache()),
+		AllowClusterScopedNamespaces: allowNS,
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.Instance{}).
 		WithOptions(controller.Options{MaxConcurrentReconciles: options.Concurrency}).
 		WatchesRawSource(
-			source.TypedKind(mgr.GetCache(), &corev1.ConfigMap{}, ValueFromEventHandler[*corev1.ConfigMap](cli)),
+			source.TypedKind(mgr.GetCache(), &corev1.ConfigMap{}, ValueFromEventHandler[*corev1.ConfigMap](cli, "ConfigMap")),
 		).
 		WatchesRawSource(
-			source.TypedKind(mgr.GetCache(), &corev1.Secret{}, ValueFromEventHandler[*corev1.Secret](cli)),
+			source.TypedKind(mgr.GetCache(), &corev1.Secret{}, ValueFromEventHandler[*corev1.Secret](cli, "Secret")),
 		).
 		WatchesRawSource(r.DynamicSources).
 		Complete(r)
 }
 
-func ValueFromEventHandler[T client.Object](cli client.Client) handler.TypedEventHandler[T, reconcile.Request] {
+// ValueFromEventHandler returns an event handler that enqueues reconcile requests
+// for all Instances in the same namespace whose ValuesFrom references the changed object.
+// kind must be passed explicitly because cached objects do not carry GVK.
+func ValueFromEventHandler[T client.Object](cli client.Client, kind string) handler.TypedEventHandler[T, reconcile.Request] {
 	return handler.TypedEnqueueRequestsFromMapFunc(handler.TypedMapFunc[T, reconcile.Request](func(ctx context.Context, obj T) []reconcile.Request {
 		instances := &appsv1.InstanceList{}
 		_ = cli.List(ctx, instances, client.InNamespace(obj.GetNamespace()))
-		kind := obj.GetObjectKind().GroupVersionKind().Kind
 		var requests []reconcile.Request
 		for _, b := range instances.Items {
 			for _, ref := range b.Spec.ValuesFrom {
@@ -79,6 +92,9 @@ type InstanceReconciler struct {
 	Applier install.Installer
 
 	DynamicSources *DynamicSources
+
+	// AllowClusterScopedNamespaces is a static set of namespaces allowed to create cluster-scoped resources.
+	AllowClusterScopedNamespaces map[string]struct{}
 }
 
 func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -191,9 +207,13 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 	}
 	instanceSpec := installerInstanceFrom(instance, values)
 
+	// Build PostRenderer pipeline
+	instanceSpec.PostRenderer = r.buildPostRenderer(ctx, instance, values)
+
 	if meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) &&
 		(instance.Spec.Version == "" || instance.Spec.Version == instance.Status.Version) &&
-		utils.EqualMapValues(instance.Status.Values.Object, values) {
+		utils.EqualMapValues(instance.Status.Values.Object, values) &&
+		reflect.DeepEqual(instance.Spec.Extensions, instance.Status.Extensions) {
 		log.Info("already uptodate")
 		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
 		return nil
@@ -215,6 +235,7 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 	instance.Status.Version = result.Version
 	instance.Status.AppVersion = result.AppVersion
 	instance.Status.Resources = result.Resources
+	instance.Status.Extensions = instance.Spec.Extensions
 
 	r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
 	return nil
@@ -246,6 +267,98 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any) ins
 		UpgradeTimestamp:  instance.Status.UpgradeTimestamp.Time,
 		Options:           instance.Spec.Options,
 	}
+}
+
+// buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
+// The pipeline order is: Namespace → Labels → Extensions → Paused → Dashboard.
+func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
+	var modifiers []postrender.ObjectModifier
+
+	// 1. Namespace enforcement — validate scope and force namespace
+	allowClusterScoped := r.isClusterScopedAllowed(ctx, instance.Namespace)
+	modifiers = append(modifiers, &postrender.NamespaceRenderer{
+		Namespace:           instance.Namespace,
+		AllowClusterScoped:  allowClusterScoped,
+		AllowCrossNamespace: allowClusterScoped,
+		RESTMapper:          r.Client.RESTMapper(),
+	})
+
+	// 2. Labels injection — always active
+	modifiers = append(modifiers, &postrender.LabelsRenderer{
+		InstanceName: instance.Name,
+		CommonLabels: getGlobalCommonLabels(values),
+	})
+
+	// 3. Extension processing (e.g. NodePort)
+	if len(instance.Spec.Extensions) > 0 {
+		modifiers = append(modifiers, &postrender.ExtensionRenderer{
+			Extensions: instance.Spec.Extensions,
+		})
+	}
+
+	// 4. Paused — scale down workloads when global.paused=true
+	paused := getGlobalPaused(values)
+	if paused {
+		modifiers = append(modifiers, &postrender.PausedRenderer{Paused: true})
+	}
+
+	return install.PostRendererChain{
+		postrender.CompositeRenderer{Modifiers: modifiers},
+		postrender.DashboardPostRenderer{Name: instance.Name, Namespace: instance.Namespace},
+	}
+}
+
+// getGlobalPaused reads global.paused from values.
+func getGlobalPaused(values map[string]any) bool {
+	global, ok := values["global"].(map[string]any)
+	if !ok {
+		return false
+	}
+	paused := global["paused"]
+	return paused == true || paused == "true"
+}
+
+// getGlobalCommonLabels reads global.commonLabels from values.
+func getGlobalCommonLabels(values map[string]any) map[string]string {
+	global, ok := values["global"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := global["commonLabels"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	labels := make(map[string]string, len(raw))
+	for k, v := range raw {
+		switch v := v.(type) {
+		case string:
+			labels[k] = v
+		case fmt.Stringer:
+			labels[k] = v.String()
+		case int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			float32, float64, bool:
+			labels[k] = fmt.Sprintf("%v", v)
+		default:
+			// skip unsupported label value type
+		}
+	}
+	return labels
+}
+
+// isClusterScopedAllowed checks whether instances in the given namespace are permitted
+// to create cluster-scoped resources. It returns true if either:
+//   - the namespace is in the static AllowClusterScopedNamespaces set, or
+//   - the Namespace object has the annotation "installer.xiaoshiai.cn/allow-cluster-scoped=true".
+func (r *InstanceReconciler) isClusterScopedAllowed(ctx context.Context, namespace string) bool {
+	if _, ok := r.AllowClusterScopedNamespaces[namespace]; ok {
+		return true
+	}
+	ns := &corev1.Namespace{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: namespace}, ns); err != nil {
+		return false
+	}
+	return ns.Annotations[AnnotationAllowClusterScoped] == "true"
 }
 
 // https://github.com/golang/go/issues/19502
@@ -355,6 +468,7 @@ func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1
 
 	// inlined values
 	base = mergeMaps(base, instance.Spec.Values.Object)
+
 	// clean nil values
 	base = cleanNilValues(base)
 	return base, nil
