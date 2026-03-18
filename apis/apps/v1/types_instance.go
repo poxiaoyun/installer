@@ -71,6 +71,28 @@ type InstanceSpec struct {
 	// Extensions is a list of extensions to extend the sync/remove logic.
 	// +kubebuilder:validation:Optional
 	Extensions []Extension `json:"extensions,omitempty"`
+
+	// Auth holds credentials for accessing the chart repository.
+	// Supports inline basic auth and secretRef for pulling from private repositories.
+	// +kubebuilder:validation:Optional
+	Auth *RepositoryAuth `json:"auth,omitempty"`
+}
+
+// RepositoryAuth configures authentication for the chart repository.
+// Inline credentials take precedence over those resolved from SecretRef.
+type RepositoryAuth struct {
+	// Username for basic authentication.
+	// +kubebuilder:validation:Optional
+	Username string `json:"username,omitempty"`
+	// Password for basic authentication.
+	// +kubebuilder:validation:Optional
+	Password string `json:"password,omitempty"`
+	// SecretRef references a Secret containing repository credentials.
+	// Supported Secret types:
+	//   - Opaque / kubernetes.io/basic-auth: expects "username" and "password" keys
+	//   - kubernetes.io/dockerconfigjson: parses ".dockerconfigjson" to match the repository host
+	// +kubebuilder:validation:Optional
+	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
 }
 
 type Option struct {

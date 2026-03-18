@@ -55,9 +55,18 @@ type Instance struct {
 
 	Options []Option
 
+	// Auth holds resolved credentials for the chart repository.
+	Auth *ResolvedAuth
+
 	// PostRenderer is an optional post-render pipeline applied to rendered manifests
 	// before they are submitted to Kubernetes.
 	PostRenderer PostRenderer
+}
+
+// ResolvedAuth contains plain-text repository credentials resolved from the Instance spec.
+type ResolvedAuth struct {
+	Username string
+	Password string
 }
 
 type Option = appsv1.Option

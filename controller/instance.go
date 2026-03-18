@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"maps"
+	"net/url"
 	"reflect"
 	"strings"
 	"time"
@@ -205,7 +207,12 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "ResolveValuesFailed", err.Error())
 		return err
 	}
-	instanceSpec := installerInstanceFrom(instance, values)
+	auth, err := r.resolveAuth(ctx, instance)
+	if err != nil {
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "ResolveAuthFailed", err.Error())
+		return err
+	}
+	instanceSpec := installerInstanceFrom(instance, values, auth)
 
 	// Build PostRenderer pipeline
 	instanceSpec.PostRenderer = r.buildPostRenderer(ctx, instance, values)
@@ -252,7 +259,7 @@ func (r *InstanceReconciler) setCondition(instance *appsv1.Instance, conditionTy
 	})
 }
 
-func installerInstanceFrom(instance *appsv1.Instance, values map[string]any) install.Instance {
+func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, auth *install.ResolvedAuth) install.Instance {
 	return install.Instance{
 		Name:              instance.Name,
 		Namespace:         instance.Namespace,
@@ -266,6 +273,7 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any) ins
 		CreationTimestamp: instance.Status.CreationTimestamp.Time,
 		UpgradeTimestamp:  instance.Status.UpgradeTimestamp.Time,
 		Options:           instance.Spec.Options,
+		Auth:              auth,
 	}
 }
 
@@ -474,6 +482,117 @@ func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1
 	return base, nil
 }
 
+// resolveAuth resolves repository credentials from the Instance spec.
+// It reads inline credentials and/or a referenced Secret, with inline fields taking precedence.
+func (r *InstanceReconciler) resolveAuth(ctx context.Context, instance *appsv1.Instance) (*install.ResolvedAuth, error) {
+	if instance.Spec.Auth == nil {
+		return nil, nil
+	}
+	auth := instance.Spec.Auth
+	resolved := &install.ResolvedAuth{
+		Username: auth.Username,
+		Password: auth.Password,
+	}
+
+	if auth.SecretRef != nil {
+		secret := &corev1.Secret{}
+		key := client.ObjectKey{Namespace: instance.Namespace, Name: auth.SecretRef.Name}
+		if err := r.Client.Get(ctx, key, secret); err != nil {
+			return nil, fmt.Errorf("get auth secret %q: %w", auth.SecretRef.Name, err)
+		}
+		switch secret.Type {
+		case corev1.SecretTypeOpaque, corev1.SecretTypeBasicAuth:
+			if resolved.Username == "" {
+				resolved.Username = string(secret.Data["username"])
+			}
+			if resolved.Password == "" {
+				resolved.Password = string(secret.Data["password"])
+			}
+		case corev1.SecretTypeDockerConfigJson:
+			u, p, err := extractDockerAuth(secret.Data[corev1.DockerConfigJsonKey], instance.Spec.URL)
+			if err != nil {
+				return nil, fmt.Errorf("parse dockerconfigjson from secret %q: %w", auth.SecretRef.Name, err)
+			}
+			if resolved.Username == "" {
+				resolved.Username = u
+			}
+			if resolved.Password == "" {
+				resolved.Password = p
+			}
+		default:
+			return nil, fmt.Errorf("unsupported secret type %q for auth secret %q", secret.Type, auth.SecretRef.Name)
+		}
+	}
+
+	if resolved.Username == "" && resolved.Password == "" {
+		return nil, nil
+	}
+	return resolved, nil
+}
+
+// dockerConfig mirrors the Docker CLI config.json structure for credential extraction.
+type dockerConfig struct {
+	Auths map[string]dockerAuthEntry `json:"auths"`
+}
+
+type dockerAuthEntry struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Auth     string `json:"auth"` // base64(username:password)
+}
+
+// extractDockerAuth parses a .dockerconfigjson blob and returns credentials
+// matching the given repository URL's host.
+func extractDockerAuth(data []byte, repoURL string) (string, string, error) {
+	var cfg dockerConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return "", "", fmt.Errorf("unmarshal dockerconfigjson: %w", err)
+	}
+
+	u, err := url.Parse(repoURL)
+	if err != nil {
+		return "", "", fmt.Errorf("parse repo url: %w", err)
+	}
+	host := u.Host
+	if host == "" {
+		host = repoURL // OCI refs like registry.example.com/chart
+	}
+
+	// Try exact match first, then host-only match
+	for _, candidate := range []string{repoURL, host} {
+		if entry, ok := cfg.Auths[candidate]; ok {
+			return resolveDockerAuthEntry(entry)
+		}
+	}
+
+	// Fallback: match by host prefix
+	for registry, entry := range cfg.Auths {
+		ru, err := url.Parse(registry)
+		if err != nil {
+			continue
+		}
+		if ru.Host == host || registry == host {
+			return resolveDockerAuthEntry(entry)
+		}
+	}
+	return "", "", fmt.Errorf("no matching auth entry for host %q", host)
+}
+
+func resolveDockerAuthEntry(entry dockerAuthEntry) (string, string, error) {
+	if entry.Username != "" {
+		return entry.Username, entry.Password, nil
+	}
+	if entry.Auth != "" {
+		decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
+		if err != nil {
+			return "", "", fmt.Errorf("decode auth field: %w", err)
+		}
+		username, password, _ := strings.Cut(string(decoded), ":")
+		return username, password, nil
+	}
+	return "", "", nil
+}
+
 func mergeMaps(a, b map[string]any) map[string]any {
 	out := make(map[string]any, len(a))
 	maps.Copy(out, a)
@@ -544,6 +663,6 @@ func (r *InstanceReconciler) Remove(ctx context.Context, instance *appsv1.Instan
 	}
 
 	log.Info("removing instance")
-	instanceSpec := installerInstanceFrom(instance, instance.Spec.Values.Object)
+	instanceSpec := installerInstanceFrom(instance, instance.Spec.Values.Object, nil)
 	return r.Applier.Remove(ctx, instanceSpec)
 }

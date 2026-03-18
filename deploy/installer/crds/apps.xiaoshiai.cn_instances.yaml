@@ -59,6 +59,36 @@ spec:
             type: object
           spec:
             properties:
+              auth:
+                description: |-
+                  Auth holds credentials for accessing the chart repository.
+                  Supports inline basic auth and secretRef for pulling from private repositories.
+                properties:
+                  password:
+                    description: Password for basic authentication.
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef references a Secret containing repository credentials.
+                      Supported Secret types:
+                        - Opaque / kubernetes.io/basic-auth: expects "username" and "password" keys
+                        - kubernetes.io/dockerconfigjson: parses ".dockerconfigjson" to match the repository host
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  username:
+                    description: Username for basic authentication.
+                    type: string
+                type: object
               chart:
                 description: Chart is the name of the chart to install.
                 type: string

@@ -30,7 +30,7 @@ type ApplyOptions struct {
 }
 
 // Download helm chart into cachedir saved as {name}-{version}.tgz file.
-func Download(ctx context.Context, repo, name, version, cachedir string) (string, *chart.Chart, error) {
+func Download(ctx context.Context, repo, name, version, cachedir, username, password string) (string, *chart.Chart, error) {
 	// check exists
 	filename := filepath.Join(cachedir, name+"-"+version+".tgz")
 	if _, err := os.Stat(filename); err == nil {
@@ -40,7 +40,7 @@ func Download(ctx context.Context, repo, name, version, cachedir string) (string
 		}
 		return filename, chart, nil
 	}
-	chartPath, chart, err := LoadAndUpdateChart(ctx, repo, name, version)
+	chartPath, chart, err := LoadAndUpdateChart(ctx, repo, name, version, username, password)
 	if err != nil {
 		return "", nil, err
 	}
@@ -59,8 +59,8 @@ func Download(ctx context.Context, repo, name, version, cachedir string) (string
 // repo is the url of the chart repository,eg: http://charts.example.com
 // if repopath is not empty,download it from repo and set chartNameOrPath to repo/repopath.
 // LoadChart loads the chart from the repository
-func LoadAndUpdateChart(ctx context.Context, repo, nameOrPath, version string) (string, *chart.Chart, error) {
-	chartPath, err := LocateChartSuper(ctx, repo, nameOrPath, version)
+func LoadAndUpdateChart(ctx context.Context, repo, nameOrPath, version, username, password string) (string, *chart.Chart, error) {
+	chartPath, err := LocateChartSuper(ctx, repo, nameOrPath, version, username, password)
 	if err != nil {
 		return "", nil, err
 	}
@@ -91,13 +91,13 @@ func LoadAndUpdateChart(ctx context.Context, repo, nameOrPath, version string) (
 	return chartPath, chart, nil
 }
 
-func LocateChartSuper(ctx context.Context, repoURL, name, version string) (string, error) {
+func LocateChartSuper(ctx context.Context, repoURL, name, version, username, password string) (string, error) {
 	repou, err := url.Parse(repoURL)
 	if err != nil {
 		return "", err
 	}
 	if repou.Scheme != FileProtocolSchema {
-		return downloadChart(ctx, repoURL, name, version)
+		return downloadChart(ctx, repoURL, name, version, username, password)
 	}
 	// handle file:// schema
 	index, err := LoadIndex(ctx, repoURL)
@@ -123,7 +123,7 @@ func LocateChartSuper(ctx context.Context, repoURL, name, version string) (strin
 	return repou.ResolveReference(downloadu).Path, nil
 }
 
-func downloadChart(_ context.Context, repourl, name, version string) (string, error) {
+func downloadChart(_ context.Context, repourl, name, version, username, password string) (string, error) {
 	settings := cli.New()
 	dl := downloader.ChartDownloader{
 		Out:              os.Stdout,
@@ -135,6 +135,11 @@ func downloadChart(_ context.Context, repourl, name, version string) (string, er
 			getter.WithInsecureSkipVerifyTLS(true),
 		},
 	}
+	if username != "" || password != "" {
+		dl.Options = append(dl.Options,
+			getter.WithBasicAuth(username, password),
+		)
+	}
 	// nolint nestif
 	if repourl != "" {
 		if registry.IsOCI(repourl) {
@@ -143,12 +148,16 @@ func downloadChart(_ context.Context, repourl, name, version string) (string, er
 					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 				},
 			}
-			registryClient, err := registry.NewClient(
+			registryOpts := []registry.ClientOption{
 				registry.ClientOptDebug(settings.Debug),
 				registry.ClientOptWriter(os.Stderr),
 				registry.ClientOptCredentialsFile(settings.RegistryConfig),
 				registry.ClientOptHTTPClient(insecureHTTPClient),
-			)
+			}
+			if username != "" {
+				registryOpts = append(registryOpts, registry.ClientOptBasicAuth(username, password))
+			}
+			registryClient, err := registry.NewClient(registryOpts...)
 			if err != nil {
 				return "", err
 			}
@@ -158,10 +167,10 @@ func downloadChart(_ context.Context, repourl, name, version string) (string, er
 		} else {
 			chartURL, err := repo.FindChartInAuthAndTLSAndPassRepoURL(
 				repourl,
-				"", "", // username password
+				username, password,
 				name, version,
 				"", "", "", // cert key ca
-				true, false, // insecureTLS passCredentialsAll
+				true, username != "", // insecureTLS passCredentialsAll
 				dl.Getters)
 			if err != nil {
 				return "", err

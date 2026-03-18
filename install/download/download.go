@@ -98,7 +98,12 @@ func (d *Downloader) Download(ctx context.Context, instance install.Instance) (s
 		return cacheIn, DownloadTgz(ctx, repo, path, cacheIn)
 	}
 	// is helm ? default helm
-	chartpath, _, err := helm.Download(ctx, repo, chart, version, filepath.Dir(cacheIn))
+	var username, password string
+	if instance.Auth != nil {
+		username = instance.Auth.Username
+		password = instance.Auth.Password
+	}
+	chartpath, _, err := helm.Download(ctx, repo, chart, version, filepath.Dir(cacheIn), username, password)
 	if err != nil {
 		return chartpath, err
 	}
