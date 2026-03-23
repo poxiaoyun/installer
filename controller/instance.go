@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 	"sigs.k8s.io/yaml"
@@ -49,11 +50,16 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	for _, ns := range options.AllowClusterScopedNamespaces {
 		allowNS[ns] = struct{}{}
 	}
+
+	dynamicSources := NewDynamicSources(mgr.GetCache(),
+		DynamicWatchEventHandler{Client: cli}.Handler(),
+		predicate.ResourceVersionChangedPredicate{})
+
 	r := &InstanceReconciler{
 		Client:                       cli,
 		Scheme:                       mgr.GetScheme(),
 		Applier:                      delegate.NewDelegate(cfg, cli, &delegate.Options{CacheDir: options.CacheDir}),
-		DynamicSources:               NewDynamicSources(mgr.GetCache()),
+		DynamicSources:               dynamicSources,
 		AllowClusterScopedNamespaces: allowNS,
 	}
 	return ctrl.NewControllerManagedBy(mgr).
@@ -65,8 +71,39 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &corev1.Secret{}, ValueFromEventHandler[*corev1.Secret](cli, "Secret")),
 		).
-		WatchesRawSource(r.DynamicSources).
+		WatchesRawSource(dynamicSources).
 		Complete(r)
+}
+
+type DynamicWatchEventHandler struct {
+	Client client.Client
+}
+
+func (d DynamicWatchEventHandler) Handler() handler.TypedEventHandler[client.Object, reconcile.Request] {
+	return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+		if obj.GetNamespace() == "" {
+			return nil
+		}
+		labels := obj.GetLabels()
+		if labels == nil {
+			return nil
+		}
+		instanceName, ok := labels["app.kubernetes.io/instance"]
+		if !ok {
+			return nil
+		}
+		key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: instanceName}
+		instance := &appsv1.Instance{}
+		if err := d.Client.Get(ctx, key, instance); err != nil {
+			logr.FromContextOrDiscard(ctx).Error(err, "get instance for dynamic watch event", "instance", key)
+			return nil
+		}
+		if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) {
+			logr.FromContextOrDiscard(ctx).Info("skip dynamic watch event for instance not in installed phase", "instance", key)
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: key}}
+	})
 }
 
 // ValueFromEventHandler returns an event handler that enqueues reconcile requests
@@ -632,19 +669,7 @@ func cleanNilValues(m map[string]any) map[string]any {
 
 func (r *InstanceReconciler) syncWatches(ctx context.Context, instance *appsv1.Instance) error {
 	for _, res := range instance.Status.Resources {
-		if err := r.DynamicSources.Watch(ctx, res.GroupVersionKind(), handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-			if obj.GetNamespace() == "" {
-				return nil
-			}
-			labels := obj.GetLabels()
-			if instanceName, ok := labels["app.kubernetes.io/instance"]; ok {
-				return []reconcile.Request{{NamespacedName: client.ObjectKey{
-					Name:      instanceName,
-					Namespace: obj.GetNamespace(),
-				}}}
-			}
-			return nil
-		})); err != nil {
+		if err := r.DynamicSources.Watch(ctx, res.GroupVersionKind()); err != nil {
 			return err
 		}
 	}

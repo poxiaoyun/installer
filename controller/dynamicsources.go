@@ -17,39 +17,47 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// Ensure DynamicSources implements source.TypedSource
+// Ensure DynamicSources implements source.TypedSource.
 var _ source.TypedSource[reconcile.Request] = &DynamicSources{}
 
 type DynamicSources struct {
 	Cache        cache.Cache
 	watchedKinds map[schema.GroupVersionKind]bool
 	watchedMutex sync.Mutex
+	eventHandler handler.TypedEventHandler[client.Object, reconcile.Request]
+	predicates   []predicate.TypedPredicate[client.Object]
 
 	// queue is captured from Start
 	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
 }
 
-func NewDynamicSources(cache cache.Cache) *DynamicSources {
+func NewDynamicSources(
+	cache cache.Cache,
+	eventHandler handler.TypedEventHandler[client.Object, reconcile.Request],
+	predicates ...predicate.TypedPredicate[client.Object],
+) *DynamicSources {
 	return &DynamicSources{
 		Cache:        cache,
 		watchedKinds: map[schema.GroupVersionKind]bool{},
+		eventHandler: eventHandler,
+		predicates:   predicates,
 	}
 }
 
 func (d *DynamicSources) Start(
-	ctx context.Context,
+	_ context.Context,
 	q workqueue.TypedRateLimitingInterface[reconcile.Request],
 ) error {
 	d.watchedMutex.Lock()
+	defer d.watchedMutex.Unlock()
+	if d.queue != nil {
+		return nil
+	}
 	d.queue = q
-	d.watchedMutex.Unlock()
 	return nil
 }
 
-func (d *DynamicSources) Watch(ctx context.Context, gvk schema.GroupVersionKind,
-	handler handler.TypedEventHandler[client.Object, reconcile.Request],
-	predicates ...predicate.TypedPredicate[client.Object],
-) error {
+func (d *DynamicSources) Watch(ctx context.Context, gvk schema.GroupVersionKind) error {
 	log := logr.FromContextOrDiscard(ctx)
 	d.watchedMutex.Lock()
 	defer d.watchedMutex.Unlock()
@@ -68,9 +76,7 @@ func (d *DynamicSources) Watch(ctx context.Context, gvk schema.GroupVersionKind,
 
 	log.Info("Starting dynamic watch for kind", "kind", gvk.String())
 
-	// Use source.TypedKind to create a source that we can start
-	// We cast u to client.Object to match the handler interface
-	src := source.TypedKind[client.Object](d.Cache, u, handler, predicates...)
+	src := source.TypedKind[client.Object](d.Cache, u, d.eventHandler, d.predicates...)
 
 	if err := src.Start(ctx, d.queue); err != nil {
 		return fmt.Errorf("failed to start watch for %s: %w", gvk.String(), err)
