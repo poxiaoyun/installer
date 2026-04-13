@@ -4,6 +4,7 @@ import (
 	"maps"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
 
 const (
@@ -13,21 +14,35 @@ const (
 	LabelManagedBy = "app.kubernetes.io/managed-by"
 )
 
-// LabelsRenderer injects CommonLabels and instance label into all rendered objects,
-// including pod templates, volume claim templates, and pod selectors.
-type LabelsRenderer struct {
-	// InstanceName is the name of the instance, always injected as LabelInstance.
+// LabelsHandler creates a labelsRenderer from extension params.
+type LabelsHandler struct {
 	InstanceName string
-	// CommonLabels is user-provided labels to inject into all resources.
 	CommonLabels map[string]string
 }
 
-func (l *LabelsRenderer) ModifyObjects(objects []*unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
-	labels := make(map[string]string, len(l.CommonLabels)+1)
-	maps.Copy(labels, l.CommonLabels)
-	labels[LabelInstance] = l.InstanceName
+func (h *LabelsHandler) Handle(objects []*unstructured.Unstructured, ext appsv1.Extension) ([]*unstructured.Unstructured, error) {
+	renderer := &labelsRenderer{
+		instanceName:   h.InstanceName,
+		commonLabels:   h.CommonLabels,
+		injectSelector: getParamKey(ext.Params, "selector") == "true",
+	}
+	return renderer.modifyObjects(objects)
+}
 
-	instanceLabel := map[string]string{LabelInstance: l.InstanceName}
+// labelsRenderer injects CommonLabels and instance label into all rendered objects,
+// including pod templates, volume claim templates, and optionally pod selectors.
+type labelsRenderer struct {
+	instanceName   string
+	commonLabels   map[string]string
+	injectSelector bool
+}
+
+func (l *labelsRenderer) modifyObjects(objects []*unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
+	labels := make(map[string]string, len(l.commonLabels)+1)
+	maps.Copy(labels, l.commonLabels)
+	labels[LabelInstance] = l.instanceName
+
+	instanceLabel := map[string]string{LabelInstance: l.instanceName}
 
 	for _, obj := range objects {
 		// inject top-level labels
@@ -36,8 +51,12 @@ func (l *LabelsRenderer) ModifyObjects(objects []*unstructured.Unstructured) ([]
 		// inject pod template labels (only if the path already exists)
 		mergeNestedLabels(obj.Object, labels, "spec", "template", "metadata", "labels")
 
-		// inject pod selector matchLabels (instance label only, only if matchLabels already exists)
-		mergeNestedLabels(obj.Object, instanceLabel, "spec", "selector", "matchLabels")
+		// inject pod selector matchLabels only when explicitly enabled.
+		// Only workload resources (Deployment, StatefulSet, etc.) are modified;
+		// CRDs like ServiceMonitor/PodMonitor must NOT be touched.
+		if l.injectSelector && isWorkloadKind(obj) {
+			mergeNestedLabels(obj.Object, instanceLabel, "spec", "selector", "matchLabels")
+		}
 
 		// inject volumeClaimTemplate labels for StatefulSets
 		if IsGroupKind(obj, "apps", "StatefulSet") {
@@ -45,6 +64,21 @@ func (l *LabelsRenderer) ModifyObjects(objects []*unstructured.Unstructured) ([]
 		}
 	}
 	return objects, nil
+}
+
+// isWorkloadKind returns true for core workload kinds whose spec.selector.matchLabels
+// is a pod selector that should track the instance label.
+func isWorkloadKind(obj *unstructured.Unstructured) bool {
+	gvk := obj.GroupVersionKind()
+	switch gvk.Group {
+	case "apps":
+		return gvk.Kind == "Deployment" || gvk.Kind == "StatefulSet" ||
+			gvk.Kind == "DaemonSet" || gvk.Kind == "ReplicaSet"
+	case "batch":
+		return gvk.Kind == "Job"
+	default:
+		return false
+	}
 }
 
 // mergeNestedLabels merges labels into a nested map[string]any path only

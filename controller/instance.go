@@ -315,11 +315,11 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, aut
 }
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
-// The pipeline order is: Namespace → Labels → Extensions → Paused → Dashboard.
+// The pipeline order is: Namespace → Extensions (Labels, NodePort, ...) → Paused → Dashboard.
 func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
 	var modifiers []postrender.ObjectModifier
 
-	// 1. Namespace enforcement — validate scope and force namespace
+	// Namespace enforcement — validate scope and force namespace
 	allowClusterScoped := r.isClusterScopedAllowed(ctx, instance.Namespace)
 	modifiers = append(modifiers, &postrender.NamespaceRenderer{
 		Namespace:           instance.Namespace,
@@ -328,20 +328,19 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 		RESTMapper:          r.Client.RESTMapper(),
 	})
 
-	// 2. Labels injection — always active
-	modifiers = append(modifiers, &postrender.LabelsRenderer{
-		InstanceName: instance.Name,
-		CommonLabels: getGlobalCommonLabels(values),
+	// Extension processing — dispatches to registered handlers by Kind.
+	modifiers = append(modifiers, &postrender.ExtensionRenderer{
+		Extensions: instance.Spec.Extensions,
+		Handlers: map[string]postrender.ExtensionHandler{
+			"NodePort": postrender.ExtensionHandlerFunc(postrender.HandleNodePort),
+			"Labels": &postrender.LabelsHandler{
+				InstanceName: instance.Name,
+				CommonLabels: getGlobalCommonLabels(values),
+			},
+		},
 	})
 
-	// 3. Extension processing (e.g. NodePort)
-	if len(instance.Spec.Extensions) > 0 {
-		modifiers = append(modifiers, &postrender.ExtensionRenderer{
-			Extensions: instance.Spec.Extensions,
-		})
-	}
-
-	// 4. Paused — scale down workloads when global.paused=true
+	// Paused — scale down workloads when global.paused=true
 	paused := getGlobalPaused(values)
 	if paused {
 		modifiers = append(modifiers, &postrender.PausedRenderer{Paused: true})
