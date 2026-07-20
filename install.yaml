@@ -21,19 +21,18 @@ spec:
       jsonPath: .status.version
       name: VERSION
       type: string
-    - description: App version
-      jsonPath: .status.appVersion
-      name: APP
-      priority: 1
-      type: string
     - description: Current phase
       jsonPath: .status.phase
       name: PHASE
       type: string
+    - description: App version
+      jsonPath: .status.appVersion
+      name: APPVERSION
+      priority: 1
+      type: string
     - description: Last upgrade
       jsonPath: .status.upgradeTimestamp
       name: UPDATE
-      priority: 1
       type: date
     - description: Creation time
       jsonPath: .metadata.creationTimestamp
@@ -62,6 +61,67 @@ spec:
             type: object
           spec:
             properties:
+              artifact:
+                description: |-
+                  Artifact references a verified chart archive stored in a Secret in the
+                  same namespace as the Instance. Artifact and URL-based sources are
+                  mutually exclusive.
+                properties:
+                  digest:
+                    description: |-
+                      Digest is the SHA-256 digest of the raw chart archive bytes.
+                      When omitted, installer still computes and reports the actual digest.
+                    type: string
+                  secretRef:
+                    description: SecretRef identifies the chart archive in the Instance
+                      namespace.
+                    properties:
+                      key:
+                        description: Key is the Secret data key containing the chart
+                          archive.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name is the Secret name in the Instance namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                required:
+                - secretRef
+                type: object
+              auth:
+                description: |-
+                  Auth holds credentials for accessing the chart repository.
+                  Supports inline basic auth and secretRef for pulling from private repositories.
+                properties:
+                  password:
+                    description: Password for basic authentication.
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef references a Secret containing repository credentials.
+                      Supported Secret types:
+                        - Opaque / kubernetes.io/basic-auth: expects "username" and "password" keys
+                        - kubernetes.io/dockerconfigjson: parses ".dockerconfigjson" to match the repository host
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  username:
+                    description: Username for basic authentication.
+                    type: string
+                type: object
               chart:
                 description: Chart is the name of the chart to install.
                 type: string
@@ -114,6 +174,28 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
+              extensions:
+                description: Extensions is a list of extensions to extend the sync/remove
+                  logic.
+                items:
+                  properties:
+                    kind:
+                      description: Kind is the kind of the extension.
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name is the name of the extension.
+                      type: string
+                    params:
+                      additionalProperties:
+                        type: string
+                      description: Params is the params of the extension.
+                      type: object
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               kind:
                 default: helm
                 description: Kind instance kind.
@@ -122,6 +204,23 @@ spec:
                 - kustomize
                 - template
                 type: string
+              options:
+                description: |-
+                  Options is a list of options to pass to the instance.
+                  if passed to helm or other deployer.
+                items:
+                  properties:
+                    name:
+                      description: Name is the name of the option.
+                      type: string
+                    value:
+                      description: Value is the value of the option.
+                      type: string
+                  required:
+                  - name
+                  - value
+                  type: object
+                type: array
               path:
                 description: Path is the path in a tarball to the chart/kustomize.
                 type: string
@@ -148,8 +247,6 @@ spec:
                     name:
                       description: Name is the name of resource being referenced
                       type: string
-                    namespace:
-                      type: string
                     optional:
                       description: Optional set to true to ignore references not found
                         error
@@ -166,27 +263,157 @@ spec:
               version:
                 description: Version is the version of helm chart, git revision, etc.
                 type: string
-            required:
-            - url
             type: object
+            x-kubernetes-validations:
+            - message: either artifact or url must be specified
+              rule: has(self.artifact) || (has(self.url) && size(self.url) > 0)
+            - message: artifact is only supported for helm instances
+              rule: '!has(self.artifact) || !has(self.kind) || self.kind == ''helm'''
+            - message: artifact cannot be combined with url, version, chart, path,
+                or auth
+              rule: '!has(self.artifact) || ((!has(self.url) || size(self.url) ==
+                0) && (!has(self.version) || size(self.version) == 0) && (!has(self.chart)
+                || size(self.chart) == 0) && (!has(self.path) || size(self.path) ==
+                0) && !has(self.auth))'
           status:
             properties:
               appVersion:
                 description: AppVersion is the app version of the instance.
                 type: string
+              artifact:
+                description: Artifact identifies the artifact used by the last successful
+                  install or upgrade.
+                properties:
+                  digest:
+                    type: string
+                type: object
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the instance's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               creationTimestamp:
                 description: CreationTimestamp is the first creation timestamp of
                   the instance.
                 format: date-time
                 type: string
+              endpoints:
+                description: Endpoints contains access endpoints extracted from Services
+                  and Ingresses
+                items:
+                  description: Endpoint represents an access endpoint for the instance
+                  properties:
+                    kind:
+                      description: Kind of endpoint, e.g. Cluster, Internal, External
+                      type: string
+                    name:
+                      type: string
+                    url:
+                      description: URL is the primary URL for this endpoint
+                      type: string
+                    urls:
+                      description: URLs is multiple URLs for this endpoint
+                      items:
+                        type: string
+                      type: array
+                  required:
+                  - kind
+                  - name
+                  - url
+                  type: object
+                type: array
+              extensions:
+                description: |-
+                  Extensions is the list of extensions that were applied during the last sync.
+                  Used to detect extension changes that require re-apply.
+                items:
+                  properties:
+                    kind:
+                      description: Kind is the kind of the extension.
+                      minLength: 1
+                      type: string
+                    name:
+                      description: Name is the name of the extension.
+                      type: string
+                    params:
+                      additionalProperties:
+                        type: string
+                      description: Params is the params of the extension.
+                      type: object
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               message:
                 description: |-
                   Message is the message associated with the status
-                  In helm, it's the notes contents.
+                  Contains error message when phase is Failed, cleared on success.
                 type: string
-              namespace:
-                description: Namespace is the namespace where the instance is installed.
+              note:
+                description: Note contains the rendered notes from helm chart
                 type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
               phase:
                 description: Phase is the current state of the release
                 type: string
@@ -205,6 +432,32 @@ spec:
                       type: string
                   type: object
                 type: array
+              states:
+                description: States contains the status of each workload component
+                  (Deployment, StatefulSet, etc.)
+                items:
+                  description: State represents the status of a workload component
+                  properties:
+                    kind:
+                      type: string
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    status:
+                      type: string
+                  required:
+                  - name
+                  - status
+                  type: object
+                type: array
+              summary:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Summary is computed from summary-expression annotation
+                  Used for displaying key business information in list views
+                type: object
               upgradeTimestamp:
                 description: UpgradeTimestamp is the time when the instance was last
                   upgraded.
@@ -238,6 +491,7 @@ metadata:
     helm.sh/chart: installer-0.0.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.0.0"
     app.kubernetes.io/component: installer
 ---
 # Source: installer/templates/rbac.yaml
@@ -251,6 +505,7 @@ metadata:
     helm.sh/chart: installer-0.0.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.0.0"
     app.kubernetes.io/component: installer
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -272,6 +527,7 @@ metadata:
     helm.sh/chart: installer-0.0.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/version: "0.0.0"
     app.kubernetes.io/component: installer
 spec:
   replicas: 1
@@ -289,13 +545,14 @@ spec:
         helm.sh/chart: installer-0.0.0
         app.kubernetes.io/instance: installer
         app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/version: "0.0.0"
         app.kubernetes.io/component: installer
     spec:
       serviceAccountName: installer
       
       containers:
         - name: installer
-          image: registry.cn-hangzhou.aliyuncs.com/xiaoshiai/installer:main
+          image: registry.cn-hangzhou.aliyuncs.com/xiaoshiai/installer:0.0.0
           imagePullPolicy: IfNotPresent
           args:
             - --leader-election

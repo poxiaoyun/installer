@@ -59,6 +59,37 @@ spec:
             type: object
           spec:
             properties:
+              artifact:
+                description: |-
+                  Artifact references a verified chart archive stored in a Secret in the
+                  same namespace as the Instance. Artifact and URL-based sources are
+                  mutually exclusive.
+                properties:
+                  digest:
+                    description: |-
+                      Digest is the SHA-256 digest of the raw chart archive bytes.
+                      When omitted, installer still computes and reports the actual digest.
+                    type: string
+                  secretRef:
+                    description: SecretRef identifies the chart archive in the Instance
+                      namespace.
+                    properties:
+                      key:
+                        description: Key is the Secret data key containing the chart
+                          archive.
+                        minLength: 1
+                        type: string
+                      name:
+                        description: Name is the Secret name in the Instance namespace.
+                        minLength: 1
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                required:
+                - secretRef
+                type: object
               auth:
                 description: |-
                   Auth holds credentials for accessing the chart repository.
@@ -230,14 +261,30 @@ spec:
               version:
                 description: Version is the version of helm chart, git revision, etc.
                 type: string
-            required:
-            - url
             type: object
+            x-kubernetes-validations:
+            - message: either artifact or url must be specified
+              rule: has(self.artifact) || (has(self.url) && size(self.url) > 0)
+            - message: artifact is only supported for helm instances
+              rule: '!has(self.artifact) || !has(self.kind) || self.kind == ''helm'''
+            - message: artifact cannot be combined with url, version, chart, path,
+                or auth
+              rule: '!has(self.artifact) || ((!has(self.url) || size(self.url) ==
+                0) && (!has(self.version) || size(self.version) == 0) && (!has(self.chart)
+                || size(self.chart) == 0) && (!has(self.path) || size(self.path) ==
+                0) && !has(self.auth))'
           status:
             properties:
               appVersion:
                 description: AppVersion is the app version of the instance.
                 type: string
+              artifact:
+                description: Artifact identifies the artifact used by the last successful
+                  install or upgrade.
+                properties:
+                  digest:
+                    type: string
+                type: object
               conditions:
                 description: Conditions represent the latest available observations
                   of the instance's state.

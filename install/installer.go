@@ -15,6 +15,33 @@ type PostRenderer interface {
 	Run(renderedManifests *bytes.Buffer, ch *chart.Chart) (modifiedManifests *bytes.Buffer, err error)
 }
 
+// IdentifiedPostRenderer exposes a stable identity for inputs that affect
+// post-rendered manifests but are not part of Helm values.
+type IdentifiedPostRenderer interface {
+	PostRenderer
+	Identity() string
+}
+
+type identifiedPostRenderer struct {
+	PostRenderer
+	identity string
+}
+
+func (r identifiedPostRenderer) Identity() string {
+	return r.identity
+}
+
+func WithPostRendererIdentity(renderer PostRenderer, identity string) PostRenderer {
+	return identifiedPostRenderer{PostRenderer: renderer, identity: identity}
+}
+
+func PostRendererIdentity(renderer PostRenderer) string {
+	if identified, ok := renderer.(IdentifiedPostRenderer); ok {
+		return identified.Identity()
+	}
+	return ""
+}
+
 // PostRendererChain chains multiple PostRenderers sequentially.
 type PostRendererChain []PostRenderer
 
@@ -43,6 +70,7 @@ type Instance struct {
 	Version    string
 	Chart      string
 	Path       string
+	Artifact   *appsv1.Artifact
 
 	// Location is the local path where the bundle is located
 	// installer should use this path to apply the bundle if exists
@@ -76,6 +104,7 @@ type InstanceStatus struct {
 	Values            map[string]any
 	Version           string
 	AppVersion        string
+	ArtifactDigest    string
 	Namespace         string
 	CreationTimestamp time.Time
 	UpgradeTimestamp  time.Time

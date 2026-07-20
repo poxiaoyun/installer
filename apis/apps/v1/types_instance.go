@@ -31,13 +31,22 @@ type InstanceList struct {
 	Items []Instance `json:"items"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.artifact) || (has(self.url) && size(self.url) > 0)",message="either artifact or url must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.artifact) || !has(self.kind) || self.kind == 'helm'",message="artifact is only supported for helm instances"
+// +kubebuilder:validation:XValidation:rule="!has(self.artifact) || ((!has(self.url) || size(self.url) == 0) && (!has(self.version) || size(self.version) == 0) && (!has(self.chart) || size(self.chart) == 0) && (!has(self.path) || size(self.path) == 0) && !has(self.auth))",message="artifact cannot be combined with url, version, chart, path, or auth"
 type InstanceSpec struct {
 	// Kind instance kind.
 	// +kubebuilder:default=helm
 	Kind InstanceKind `json:"kind,omitempty"`
 
+	// Artifact references a verified chart archive stored in a Secret in the
+	// same namespace as the Instance. Artifact and URL-based sources are
+	// mutually exclusive.
+	// +kubebuilder:validation:Optional
+	Artifact *Artifact `json:"artifact,omitempty"`
+
 	// URL is the URL of helm repository, git clone url, tarball url, s3 url, etc.
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Optional
 	URL string `json:"url,omitempty"`
 
 	// Version is the version of helm chart, git revision, etc.
@@ -76,6 +85,28 @@ type InstanceSpec struct {
 	// Supports inline basic auth and secretRef for pulling from private repositories.
 	// +kubebuilder:validation:Optional
 	Auth *RepositoryAuth `json:"auth,omitempty"`
+}
+
+// Artifact describes an immutable chart source stored in a Secret.
+type Artifact struct {
+	// SecretRef identifies the chart archive in the Instance namespace.
+	SecretRef ArtifactSecretRef `json:"secretRef"`
+
+	// Digest is the SHA-256 digest of the raw chart archive bytes.
+	// When omitted, installer still computes and reports the actual digest.
+	// +kubebuilder:validation:Optional
+	Digest string `json:"digest,omitempty"`
+}
+
+// ArtifactSecretRef references a chart archive in a Kubernetes Secret.
+type ArtifactSecretRef struct {
+	// Name is the Secret name in the Instance namespace.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Key is the Secret data key containing the chart archive.
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
 }
 
 // RepositoryAuth configures authentication for the chart repository.
@@ -161,6 +192,9 @@ type InstanceStatus struct {
 	// AppVersion is the app version of the instance.
 	AppVersion string `json:"appVersion,omitempty"`
 
+	// Artifact identifies the artifact used by the last successful install or upgrade.
+	Artifact *ArtifactStatus `json:"artifact,omitempty"`
+
 	// CreationTimestamp is the first creation timestamp of the instance.
 	CreationTimestamp metav1.Time `json:"creationTimestamp,omitempty"`
 
@@ -183,6 +217,11 @@ type InstanceStatus struct {
 	// Extensions is the list of extensions that were applied during the last sync.
 	// Used to detect extension changes that require re-apply.
 	Extensions []Extension `json:"extensions,omitempty"`
+}
+
+// ArtifactStatus records the last successfully installed artifact.
+type ArtifactStatus struct {
+	Digest string `json:"digest,omitempty"`
 }
 
 type ManagedResource struct {

@@ -2,11 +2,17 @@ package helm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"hash"
+	"sort"
 	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/release"
 	"k8s.io/client-go/rest"
@@ -46,8 +52,9 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 	}
 
 	helmPR := NewHelmPostRenderer(instance.PostRenderer, loadedChart)
+	desiredState := desiredReleaseState(loadedChart, install.PostRendererIdentity(instance.PostRenderer))
 
-	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, loadedChart, instance.Values, options, helmPR)
+	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, loadedChart, instance.Values, options, helmPR, desiredState)
 	if err != nil {
 		return nil, err
 	}
@@ -65,6 +72,51 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 		Resources:         ParseResourceReferences([]byte(applyedRelease.Manifest)),
 		ChartAnnotations:  applyedRelease.Chart.Metadata.Annotations,
 	}, nil
+}
+
+func desiredReleaseState(ch *chart.Chart, postRendererIdentity string) string {
+	h := sha256.New224()
+	writeChartState(h, ch)
+	writeStateBytes(h, []byte(postRendererIdentity))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func writeChartState(h hash.Hash, ch *chart.Chart) {
+	if ch == nil {
+		writeStateBytes(h, nil)
+		return
+	}
+	metadata, _ := json.Marshal(ch.Metadata)
+	lock, _ := json.Marshal(ch.Lock)
+	values, _ := json.Marshal(ch.Values)
+	writeStateBytes(h, metadata)
+	writeStateBytes(h, lock)
+	writeStateBytes(h, values)
+	writeStateBytes(h, ch.Schema)
+	writeChartFiles(h, ch.Templates)
+	writeChartFiles(h, ch.Files)
+
+	dependencies := append([]*chart.Chart(nil), ch.Dependencies()...)
+	sort.Slice(dependencies, func(i, j int) bool {
+		return dependencies[i].ChartFullPath() < dependencies[j].ChartFullPath()
+	})
+	for _, dependency := range dependencies {
+		writeChartState(h, dependency)
+	}
+}
+
+func writeChartFiles(h hash.Hash, files []*chart.File) {
+	files = append([]*chart.File(nil), files...)
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
+	for _, file := range files {
+		writeStateBytes(h, []byte(file.Name))
+		writeStateBytes(h, file.Data)
+	}
+}
+
+func writeStateBytes(h hash.Hash, data []byte) {
+	_, _ = fmt.Fprintf(h, "%d:", len(data))
+	_, _ = h.Write(data)
 }
 
 func ParseOptions(options []install.Option) (Options, error) {

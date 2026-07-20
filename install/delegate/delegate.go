@@ -30,22 +30,25 @@ func NewDelegate(cfg *rest.Config, cli client.Client, options *Options) *BundleA
 			appsv1.InstanceKindKustomize: native.New(cli, kustomize.KustomizeBuildFunc),
 			appsv1.InstanceKindTemplate:  native.New(cli, template.NewTemplaterFunc(cfg)),
 		},
-		downloader: download.NewDownloader(options.CacheDir),
+		downloader:     download.NewDownloader(options.CacheDir),
+		artifactLoader: download.NewArtifactLoader(cli, options.CacheDir),
 	}
 }
 
 type BundleApplier struct {
-	appliers   map[appsv1.InstanceKind]install.Installer
-	downloader *download.Downloader
+	appliers       map[appsv1.InstanceKind]install.Installer
+	downloader     *download.Downloader
+	artifactLoader *download.ArtifactLoader
 }
 
 var _ install.Installer = &BundleApplier{}
 
 func (b *BundleApplier) Template(ctx context.Context, instance install.Instance) ([]byte, error) {
-	into, err := b.Download(ctx, instance)
+	into, _, cleanup, err := b.resolveLocation(ctx, instance)
 	if err != nil {
-		return nil, fmt.Errorf("download: %w", err)
+		return nil, fmt.Errorf("resolve source: %w", err)
 	}
+	defer cleanup()
 	instance.Location = into
 	if apply, ok := b.appliers[instance.Kind]; ok {
 		return apply.Template(ctx, instance)
@@ -60,14 +63,27 @@ func (b *BundleApplier) Download(ctx context.Context, instance install.Instance)
 	return b.downloader.Download(ctx, instance)
 }
 
-func (b *BundleApplier) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {
-	into, err := b.Download(ctx, instance)
-	if err != nil {
-		return nil, fmt.Errorf("download: %w", err)
+func (b *BundleApplier) resolveLocation(ctx context.Context, instance install.Instance) (string, string, func(), error) {
+	if instance.Artifact != nil {
+		return b.artifactLoader.Load(ctx, instance.Namespace, instance.Artifact)
 	}
+	path, err := b.Download(ctx, instance)
+	return path, "", func() {}, err
+}
+
+func (b *BundleApplier) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {
+	into, artifactDigest, cleanup, err := b.resolveLocation(ctx, instance)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source: %w", err)
+	}
+	defer cleanup()
 	instance.Location = into
 	if apply, ok := b.appliers[instance.Kind]; ok {
-		return apply.Apply(ctx, instance)
+		status, err := apply.Apply(ctx, instance)
+		if err == nil && status != nil {
+			status.ArtifactDigest = artifactDigest
+		}
+		return status, err
 	}
 	return nil, fmt.Errorf("unknown bundle kind: %s", instance.Kind)
 }

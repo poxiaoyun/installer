@@ -19,7 +19,6 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
 	"xiaoshiai.cn/installer/install"
-	"xiaoshiai.cn/installer/utils"
 )
 
 type Options struct {
@@ -32,6 +31,8 @@ type Options struct {
 	WaitForJobs     bool
 	SubNotes        bool
 }
+
+const DesiredStateLabel = "apps.xiaoshiai.cn/desired-state"
 
 const (
 	DefaultTimeout  = 10 * time.Minute
@@ -76,7 +77,7 @@ func TemplateChart(ctx context.Context, rlsname, namespace string, chartPath str
 	return []byte(rls.Manifest), nil
 }
 
-func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, loadedChart *chart.Chart, values map[string]any, options Options, pr postrender.PostRenderer) (*release.Release, error) {
+func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string, loadedChart *chart.Chart, values map[string]any, options Options, pr postrender.PostRenderer, desiredState string) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	if rlsname == "" {
 		rlsname = loadedChart.Name()
@@ -91,7 +92,7 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 			return nil, err
 		}
 		// not install, install it now
-		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr)
+		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr, desiredState)
 	}
 
 	// Handle pending/failed states that may block operations
@@ -102,7 +103,7 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 			return nil, fmt.Errorf("failed to recover from pending state: %w", err)
 		}
 		// After recovery, proceed with fresh install
-		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr)
+		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr, desiredState)
 
 	case release.StatusUninstalling:
 		log.Info("release is uninstalling, waiting for completion")
@@ -114,21 +115,23 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 		// Fall through to upgrade logic
 	}
 
-	// check should upgrade
+	// The controller may retry after Helm succeeded but before Instance status
+	// was persisted. Check the Helm release itself before creating a revision.
 	if existRelease.Info.Status == release.StatusDeployed &&
-		existRelease.Chart.Metadata.Version == loadedChart.Metadata.Version &&
-		utils.EqualMapValues(existRelease.Config, values) {
-		log.Info("already uptodate", "values", values)
+		existRelease.Labels[DesiredStateLabel] == desiredState &&
+		equalMapValues(existRelease.Config, values) {
+		log.Info("already uptodate")
 		return existRelease, nil
 	}
+
 	log.Info("upgrading", "old", existRelease.Config, "new", values)
-	return upgradeChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr)
+	return upgradeChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr, desiredState)
 }
 
 // installChart performs a fresh helm install
-func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options, pr postrender.PostRenderer) (*release.Release, error) {
+func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options, pr postrender.PostRenderer, desiredState string) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
-	log.Info("installing", "values", values)
+	log.Info("installing")
 
 	install := action.NewInstall(helmcfg)
 	install.ReleaseName = rlsname
@@ -139,11 +142,12 @@ func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChar
 	install.Wait = options.Wait
 	install.SubNotes = options.SubNotes
 	install.PostRenderer = pr
+	install.Labels = map[string]string{DesiredStateLabel: desiredState}
 	return install.RunWithContext(ctx, loadedChart, values)
 }
 
 // upgradeChart performs a helm upgrade
-func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options, pr postrender.PostRenderer) (*release.Release, error) {
+func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChart *chart.Chart, rlsname, namespace string, values map[string]interface{}, options Options, pr postrender.PostRenderer, desiredState string) (*release.Release, error) {
 	log := logr.FromContextOrDiscard(ctx).WithValues("name", rlsname, "namespace", namespace)
 	log.Info("upgrading release")
 
@@ -156,6 +160,7 @@ func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChar
 	upgrade.Wait = options.Wait
 	upgrade.SubNotes = options.SubNotes
 	upgrade.PostRenderer = pr
+	upgrade.Labels = map[string]string{DesiredStateLabel: desiredState}
 	return upgrade.RunWithContext(ctx, rlsname, loadedChart, values)
 }
 

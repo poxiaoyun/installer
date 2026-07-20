@@ -2,7 +2,10 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
@@ -113,15 +116,29 @@ func ValueFromEventHandler[T client.Object](cli client.Client, kind string) hand
 	return handler.TypedEnqueueRequestsFromMapFunc(handler.TypedMapFunc[T, reconcile.Request](func(ctx context.Context, obj T) []reconcile.Request {
 		instances := &appsv1.InstanceList{}
 		_ = cli.List(ctx, instances, client.InNamespace(obj.GetNamespace()))
-		var requests []reconcile.Request
+		requests := map[client.ObjectKey]struct{}{}
 		for _, b := range instances.Items {
 			for _, ref := range b.Spec.ValuesFrom {
 				if strings.EqualFold(ref.Kind, kind) && ref.Name == obj.GetName() {
-					requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&b)})
+					requests[client.ObjectKeyFromObject(&b)] = struct{}{}
+				}
+			}
+			if strings.EqualFold(kind, "Secret") && b.Spec.Artifact != nil && b.Spec.Artifact.SecretRef.Name == obj.GetName() {
+				installedDigest := ""
+				if b.Status.Artifact != nil {
+					installedDigest = b.Status.Artifact.Digest
+				}
+				digestBehind := b.Spec.Artifact.Digest != "" && installedDigest != b.Spec.Artifact.Digest
+				if !meta.IsStatusConditionTrue(b.Status.Conditions, appsv1.ConditionInstalled) || digestBehind {
+					requests[client.ObjectKeyFromObject(&b)] = struct{}{}
 				}
 			}
 		}
-		return requests
+		result := make([]reconcile.Request, 0, len(requests))
+		for key := range requests {
+			result = append(result, reconcile.Request{NamespacedName: key})
+		}
+		return result
 	}))
 }
 
@@ -238,6 +255,10 @@ func (r *InstanceReconciler) syncDeps(ctx context.Context, instance *appsv1.Inst
 
 func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.Instance) error {
 	log := logr.FromContextOrDiscard(ctx)
+	if err := validateInstanceSource(instance); err != nil {
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "InvalidSource", err.Error())
+		return err
+	}
 
 	values, err := r.resolveValues(ctx, instance)
 	if err != nil {
@@ -254,10 +275,7 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 	// Build PostRenderer pipeline
 	instanceSpec.PostRenderer = r.buildPostRenderer(ctx, instance, values)
 
-	if meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) &&
-		(instance.Spec.Version == "" || instance.Spec.Version == instance.Status.Version) &&
-		utils.EqualMapValues(instance.Status.Values.Object, values) &&
-		reflect.DeepEqual(instance.Spec.Extensions, instance.Status.Extensions) {
+	if executionUpToDate(instance, values) {
 		log.Info("already uptodate")
 		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
 		return nil
@@ -267,7 +285,11 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 	result, err := r.Applier.Apply(ctx, instanceSpec)
 	if err != nil {
 		log.Error(err, "apply instance")
-		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "ApplyFailed", err.Error())
+		reason := string(apierrors.ReasonForError(err))
+		if reason == string(metav1.StatusReasonUnknown) {
+			reason = "ApplyFailed"
+		}
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, reason, err.Error())
 		return err
 	}
 
@@ -278,6 +300,11 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 	instance.Status.Values = appsv1.Values{Object: result.Values}
 	instance.Status.Version = result.Version
 	instance.Status.AppVersion = result.AppVersion
+	if instance.Spec.Artifact != nil {
+		instance.Status.Artifact = &appsv1.ArtifactStatus{Digest: result.ArtifactDigest}
+	} else {
+		instance.Status.Artifact = nil
+	}
 	instance.Status.Resources = result.Resources
 	instance.Status.Extensions = instance.Spec.Extensions
 
@@ -305,6 +332,7 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, aut
 		Version:           instance.Spec.Version,
 		Path:              instance.Spec.Path,
 		Chart:             instance.Spec.Chart,
+		Artifact:          instance.Spec.Artifact,
 		Values:            values,
 		Resources:         instance.Status.Resources,
 		CreationTimestamp: instance.Status.CreationTimestamp.Time,
@@ -312,6 +340,49 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, aut
 		Options:           instance.Spec.Options,
 		Auth:              auth,
 	}
+}
+
+func executionUpToDate(instance *appsv1.Instance, values map[string]any) bool {
+	if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) {
+		return false
+	}
+	if instance.Status.ObservedGeneration != instance.Generation {
+		return false
+	}
+	if !utils.EqualMapValues(instance.Status.Values.Object, values) {
+		return false
+	}
+	if !reflect.DeepEqual(instance.Spec.Extensions, instance.Status.Extensions) {
+		return false
+	}
+	if instance.Status.Artifact != nil {
+		if instance.Spec.Artifact == nil {
+			return false
+		}
+		return instance.Spec.Artifact.Digest == "" || instance.Spec.Artifact.Digest == instance.Status.Artifact.Digest
+	}
+
+	// URL version may be a repository revision or tag and does not
+	// necessarily equal the installed Chart metadata version. Any source
+	// field change already increments Instance generation.
+	return instance.Spec.Artifact == nil
+}
+
+func validateInstanceSource(instance *appsv1.Instance) error {
+	artifact := instance.Spec.Artifact
+	if artifact == nil {
+		if instance.Spec.URL == "" {
+			return fmt.Errorf("either artifact or url must be specified")
+		}
+		return nil
+	}
+	if instance.Spec.Kind != "" && instance.Spec.Kind != appsv1.InstanceKindHelm {
+		return fmt.Errorf("artifact is only supported for helm instances")
+	}
+	if instance.Spec.URL != "" || instance.Spec.Version != "" || instance.Spec.Chart != "" || instance.Spec.Path != "" || instance.Spec.Auth != nil {
+		return fmt.Errorf("artifact cannot be combined with url, version, chart, path, or auth")
+	}
+	return nil
 }
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
@@ -346,10 +417,26 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 		modifiers = append(modifiers, &postrender.PausedRenderer{Paused: true})
 	}
 
-	return install.PostRendererChain{
+	chain := install.PostRendererChain{
 		postrender.CompositeRenderer{Modifiers: modifiers},
 		postrender.DashboardPostRenderer{Name: instance.Name, Namespace: instance.Namespace},
 	}
+	return install.WithPostRendererIdentity(chain, postRendererIdentity(instance.Spec.Extensions, allowClusterScoped))
+}
+
+func postRendererIdentity(extensions []appsv1.Extension, allowClusterScoped bool) string {
+	state := struct {
+		Version            int                `json:"version"`
+		Extensions         []appsv1.Extension `json:"extensions,omitempty"`
+		AllowClusterScoped bool               `json:"allowClusterScoped"`
+	}{
+		Version:            1,
+		Extensions:         extensions,
+		AllowClusterScoped: allowClusterScoped,
+	}
+	data, _ := json.Marshal(state)
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
 }
 
 // getGlobalPaused reads global.paused from values.

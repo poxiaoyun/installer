@@ -3,8 +3,36 @@ package helm
 import (
 	"testing"
 
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/release"
 )
+
+func TestDesiredReleaseState(t *testing.T) {
+	base := func() *chart.Chart {
+		return &chart.Chart{
+			Metadata:  &chart.Metadata{Name: "demo", Version: "1.0.0"},
+			Values:    map[string]any{"value": "one"},
+			Templates: []*chart.File{{Name: "templates/configmap.yaml", Data: []byte("value: one")}},
+			Files:     []*chart.File{{Name: "dashboards/demo.json", Data: []byte("{}")}},
+		}
+	}
+
+	want := desiredReleaseState(base(), "post-render-v1")
+	if got := desiredReleaseState(base(), "post-render-v1"); got != want {
+		t.Fatalf("desiredReleaseState() = %q, want stable value %q", got, want)
+	}
+	if got := desiredReleaseState(base(), "post-render-v2"); got == want {
+		t.Fatal("desiredReleaseState() did not change with post-render identity")
+	}
+	changedChart := base()
+	changedChart.Templates[0].Data = []byte("value: two")
+	if got := desiredReleaseState(changedChart, "post-render-v1"); got == want {
+		t.Fatal("desiredReleaseState() did not change with chart content")
+	}
+	if len(want) > 63 {
+		t.Fatalf("desiredReleaseState() length = %d, exceeds Kubernetes label value limit", len(want))
+	}
+}
 
 func TestEqualMapValues(t *testing.T) {
 	tests := []struct {
