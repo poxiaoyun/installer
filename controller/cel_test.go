@@ -53,6 +53,11 @@ func TestEvalCELExpression(t *testing.T) {
 			},
 		},
 		{
+			name: "optional field with fallback",
+			expr: "values.?missing.orValue('fallback')",
+			want: "fallback",
+		},
+		{
 			name:    "invalid syntax",
 			expr:    "values.foo +",
 			wantErr: true,

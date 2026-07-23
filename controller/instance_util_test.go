@@ -20,8 +20,9 @@ type countingInstaller struct {
 func (c *countingInstaller) Apply(_ context.Context, instance install.Instance) (*install.InstanceStatus, error) {
 	c.applyCount++
 	return &install.InstanceStatus{
-		Values:  instance.Values,
-		Version: "1.0.0",
+		Values:     instance.Values,
+		Version:    "1.0.0",
+		AppVersion: "2.0.0",
 	}, nil
 }
 
@@ -62,6 +63,9 @@ func TestSyncInstallAppliesOncePerDesiredState(t *testing.T) {
 	if applier.applyCount != 1 {
 		t.Fatalf("Apply() calls after first sync = %d, want 1", applier.applyCount)
 	}
+	if instance.Status.Version != "1.0.0" || instance.Status.AppVersion != "2.0.0" {
+		t.Fatalf("status versions = %q/%q, want 1.0.0/2.0.0", instance.Status.Version, instance.Status.AppVersion)
+	}
 	// Reconcile records the generation after the sync succeeds.
 	instance.Status.ObservedGeneration = instance.Generation
 
@@ -72,9 +76,41 @@ func TestSyncInstallAppliesOncePerDesiredState(t *testing.T) {
 		t.Fatalf("Apply() calls after unchanged sync = %d, want 1", applier.applyCount)
 	}
 
+	// Runtime expression annotations are evaluated from Instance metadata and do
+	// not change the desired Helm release state.
+	instance.Annotations = map[string]string{
+		appsv1.AnnotationSummaryExpression: `{"source":"instance"}`,
+	}
+	if err := reconciler.syncInstall(context.Background(), instance); err != nil {
+		t.Fatalf("annotation-only syncInstall() error = %v", err)
+	}
+	if applier.applyCount != 1 {
+		t.Fatalf("Apply() calls after annotation-only change = %d, want 1", applier.applyCount)
+	}
+	if err := reconciler.checkAnnotations(context.Background(), instance, nil); err != nil {
+		t.Fatalf("checkAnnotations() error = %v", err)
+	}
+	if got := instance.Status.Summary["source"]; got != "instance" {
+		t.Fatalf("summary source = %q, want instance", got)
+	}
+
+	delete(instance.Annotations, appsv1.AnnotationSummaryExpression)
+	if err := reconciler.syncInstall(context.Background(), instance); err != nil {
+		t.Fatalf("annotation removal syncInstall() error = %v", err)
+	}
+	if applier.applyCount != 1 {
+		t.Fatalf("Apply() calls after annotation removal = %d, want 1", applier.applyCount)
+	}
+	if err := reconciler.checkAnnotations(context.Background(), instance, nil); err != nil {
+		t.Fatalf("checkAnnotations() after annotation removal error = %v", err)
+	}
+	if instance.Status.Summary != nil {
+		t.Fatalf("summary after annotation removal = %#v", instance.Status.Summary)
+	}
+
 	// Extensions affect post-rendering even when chart version and values stay the same.
 	instance.Generation++
-	instance.Spec.Extensions = []appsv1.Extension{{Name: "labels", Kind: "Labels"}}
+	instance.Spec.Extensions = []appsv1.Extension{{Name: "common-metadata", Kind: "CommonMetadata"}}
 	if err := reconciler.syncInstall(context.Background(), instance); err != nil {
 		t.Fatalf("extension change syncInstall() error = %v", err)
 	}
@@ -100,13 +136,13 @@ func TestExecutionUpToDate(t *testing.T) {
 				URL:        "oci://example.test/chart",
 				Version:    "repository-tag",
 				Values:     appsv1.Values{Object: map[string]any{"replicas": int64(1)}},
-				Extensions: []appsv1.Extension{{Name: "labels", Kind: "Labels"}},
+				Extensions: []appsv1.Extension{{Name: "common-metadata", Kind: "CommonMetadata"}},
 			},
 			Status: appsv1.InstanceStatus{
 				ObservedGeneration: 2,
 				Version:            "1.0.0",
 				Values:             appsv1.Values{Object: map[string]any{"replicas": int64(1)}},
-				Extensions:         []appsv1.Extension{{Name: "labels", Kind: "Labels"}},
+				Extensions:         []appsv1.Extension{{Name: "common-metadata", Kind: "CommonMetadata"}},
 				Conditions: []metav1.Condition{{
 					Type:   appsv1.ConditionInstalled,
 					Status: metav1.ConditionTrue,

@@ -364,6 +364,10 @@ spec:
                       type: string
                     name:
                       type: string
+                    relation:
+                      description: Relation describes the data flow between this instance
+                        and the endpoint.
+                      type: string
                     url:
                       description: URL is the primary URL for this endpoint
                       type: string

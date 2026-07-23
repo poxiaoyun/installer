@@ -70,7 +70,6 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 		Version:           applyedRelease.Chart.Metadata.Version,
 		AppVersion:        applyedRelease.Chart.Metadata.AppVersion,
 		Resources:         ParseResourceReferences([]byte(applyedRelease.Manifest)),
-		ChartAnnotations:  applyedRelease.Chart.Metadata.Annotations,
 	}, nil
 }
 

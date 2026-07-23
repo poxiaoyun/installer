@@ -12,13 +12,6 @@ type ExtensionHandler interface {
 	Handle(objects []*unstructured.Unstructured, ext appsv1.Extension) ([]*unstructured.Unstructured, error)
 }
 
-// ExtensionHandlerFunc adapts a plain function to the ExtensionHandler interface.
-type ExtensionHandlerFunc func(objects []*unstructured.Unstructured, ext appsv1.Extension) ([]*unstructured.Unstructured, error)
-
-func (f ExtensionHandlerFunc) Handle(objects []*unstructured.Unstructured, ext appsv1.Extension) ([]*unstructured.Unstructured, error) {
-	return f(objects, ext)
-}
-
 // ExtensionRenderer dispatches extensions to registered handlers by Kind.
 // Unknown extension kinds are silently skipped.
 type ExtensionRenderer struct {
@@ -39,14 +32,4 @@ func (e *ExtensionRenderer) ModifyObjects(objects []*unstructured.Unstructured) 
 		}
 	}
 	return objects, nil
-}
-
-// getParamKey returns the value of the first matching key found in params.
-func getParamKey(params map[string]string, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := params[k]; ok {
-			return v
-		}
-	}
-	return ""
 }

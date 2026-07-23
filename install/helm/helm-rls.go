@@ -59,6 +59,7 @@ func NewHelmConfig(ctx context.Context, namespace string, cfg *rest.Config) (*ac
 	if kc, ok := config.KubeClient.(*kube.Client); ok {
 		kc.Namespace = namespace // install to namespace
 	}
+	config.KubeClient = newLifecycleKubeClient(config.KubeClient)
 	return config, nil
 }
 
@@ -86,6 +87,10 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 	if err != nil {
 		return nil, err
 	}
+	if client, ok := helmcfg.KubeClient.(*lifecycleKubeClient); ok {
+		client.timeout = Or(options.Timeout, DefaultTimeout)
+	}
+	pr = newLifecyclePostRenderer(pr)
 	existRelease, err := action.NewGet(helmcfg).Run(rlsname)
 	if err != nil {
 		if !errors.Is(err, driver.ErrReleaseNotFound) {

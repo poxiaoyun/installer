@@ -302,6 +302,8 @@ type Endpoint struct {
 	URLs []string `json:"urls,omitempty"`
 	// Kind of endpoint, e.g. Cluster, Internal, External
 	Kind EndpointKind `json:"kind"`
+	// Relation describes the data flow between this instance and the endpoint.
+	Relation EndpointRelation `json:"relation,omitempty"`
 }
 
 // EndpointKind represents the accessibility level of an endpoint
@@ -316,6 +318,9 @@ const (
 	EndpointKindExternal EndpointKind = "External"
 )
 
+// EndpointRelation describes how the instance uses an endpoint.
+type EndpointRelation string
+
 // Condition types for Instance
 const (
 	// ConditionDependenciesReady indicates whether all dependencies are ready.
@@ -324,4 +329,6 @@ const (
 	ConditionInstalled = "Installed"
 	// ConditionReady indicates whether the instance is ready and fully operational.
 	ConditionReady = "Ready"
+	// ConditionExpressionsReady indicates whether configured status expressions evaluated successfully.
+	ConditionExpressionsReady = "ExpressionsReady"
 )

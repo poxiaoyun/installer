@@ -43,6 +43,7 @@ func (p *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 	ns := instance.Namespace
 	diffresult := DiffWithDefaultNamespace(p.Cli.Client, ns, instance.Resources, resources)
 	if len(diffresult.Creats) == 0 &&
+		len(diffresult.Applys) == 0 &&
 		len(diffresult.Removes) == 0 {
 		log.Info("all resources are already applied")
 		return &install.InstanceStatus{

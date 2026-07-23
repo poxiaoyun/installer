@@ -107,7 +107,7 @@ var _ = Describe("Chart Secret artifacts", func() {
 		// A post-render-only change must not be hidden by matching Chart content
 		// and values in the Helm-level idempotency check.
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
-		instance.Spec.Extensions = []appsv1.Extension{{Name: "labels", Kind: "Labels"}}
+		instance.Spec.Extensions = []appsv1.Extension{{Name: "common-metadata", Kind: "CommonMetadata"}}
 		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
 		eventuallyInstalledArtifact(instance, digestV2, "0.1.0")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cm), cm)).To(Succeed())

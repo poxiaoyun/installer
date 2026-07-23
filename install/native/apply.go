@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -15,10 +16,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
+	"xiaoshiai.cn/installer/install"
 )
 
 type DiffResult struct {
@@ -71,6 +74,7 @@ func NewDefaultSyncOptions() *SyncOptions {
 		ServerSideApply: true,
 		CreateNamespace: true,
 		CleanCRD:        false,
+		DeleteTimeout:   2 * time.Minute,
 	}
 }
 
@@ -78,6 +82,9 @@ type SyncOptions struct {
 	ServerSideApply bool
 	CreateNamespace bool
 	CleanCRD        bool
+	// DeleteTimeout bounds foreground deletion for resources using the
+	// Recreate upgrade strategy.
+	DeleteTimeout time.Duration
 }
 
 type ClientApply struct {
@@ -103,6 +110,32 @@ func (a *ClientApply) Sync(ctx context.Context,
 
 func (a *ClientApply) SyncDiff(ctx context.Context, diff DiffResult, options *SyncOptions) ([]appsv1.ManagedResource, error) {
 	log := logr.FromContextOrDiscard(ctx)
+	if options == nil {
+		options = NewDefaultSyncOptions()
+	}
+
+	// Resolve removed resources from the API before validating. Diff only has
+	// references for removed resources, while remove strategy is stored on the
+	// live object. Do the complete validation pass before any mutation.
+	for _, item := range append(append([]*unstructured.Unstructured{}, diff.Creats...), diff.Applys...) {
+		if err := install.ValidateLifecycleStrategies(item); err != nil {
+			return nil, err
+		}
+	}
+	for i, item := range diff.Removes {
+		live := item.DeepCopy()
+		if err := a.Client.Get(ctx, client.ObjectKeyFromObject(item), live); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return nil, fmt.Errorf("get removed resource %s %s/%s: %w",
+				item.GroupVersionKind().String(), item.GetNamespace(), item.GetName(), err)
+		}
+		if err := install.ValidateLifecycleStrategies(live); err != nil {
+			return nil, err
+		}
+		diff.Removes[i] = live
+	}
 
 	errs := []string{}
 
@@ -128,6 +161,18 @@ func (a *ClientApply) SyncDiff(ctx context.Context, diff DiffResult, options *Sy
 
 		if IsSkipUpdate(item) {
 			log.Info("ignoring update", "resource", item.GetObjectKind().GroupVersionKind().String(), "name", item.GetName(), "namespace", item.GetNamespace())
+			continue
+		}
+		if IsRecreateUpdate(item) {
+			log.Info("recreating resource", "resource", item.GetObjectKind().GroupVersionKind().String(), "name", item.GetName(), "namespace", item.GetNamespace())
+			if options.CreateNamespace {
+				a.createNsIfNotExists(ctx, item.GetNamespace())
+			}
+			if err := a.recreateResource(ctx, item, options.DeleteTimeout); err != nil {
+				err = fmt.Errorf("%s %s/%s: %v", item.GetObjectKind().GroupVersionKind().String(), item.GetNamespace(), item.GetName(), err)
+				log.Error(err, "recreating resource")
+				errs = append(errs, err.Error())
+			}
 			continue
 		}
 
@@ -174,6 +219,38 @@ func (a *ClientApply) SyncDiff(ctx context.Context, diff DiffResult, options *Sy
 	} else {
 		return managed, nil
 	}
+}
+
+func (a *ClientApply) recreateResource(ctx context.Context, obj *unstructured.Unstructured, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	live := obj.DeepCopy()
+	err := a.Client.Get(ctx, client.ObjectKeyFromObject(obj), live)
+	switch {
+	case apierrors.IsNotFound(err):
+		return a.Client.Create(ctx, obj)
+	case err != nil:
+		return fmt.Errorf("get before recreate: %w", err)
+	}
+
+	propagation := metav1.DeletePropagationForeground
+	if err := a.Client.Delete(ctx, live, &client.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete before recreate: %w", err)
+	}
+	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		check := obj.DeepCopy()
+		err := a.Client.Get(ctx, client.ObjectKeyFromObject(obj), check)
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}); err != nil {
+		return fmt.Errorf("wait for foreground deletion: %w", err)
+	}
+	obj.SetResourceVersion("")
+	obj.SetUID("")
+	return a.Client.Create(ctx, obj)
 }
 
 func (a *ClientApply) createNsIfNotExists(ctx context.Context, name string) error {
@@ -224,11 +301,18 @@ func ApplyResource(ctx context.Context, cli client.Client, obj client.Object, op
 }
 
 func IsSkipUpdate(obj client.Object) bool {
-	return false
+	strategy, err := install.UpgradeStrategy(obj)
+	return err == nil && strategy == install.UpgradeStrategyRetain
+}
+
+func IsRecreateUpdate(obj client.Object) bool {
+	strategy, err := install.UpgradeStrategy(obj)
+	return err == nil && strategy == install.UpgradeStrategyRecreate
 }
 
 func IsSkipDelete(obj client.Object) bool {
-	return false
+	strategy, err := install.RemoveStrategy(obj)
+	return err == nil && strategy == install.RemoveStrategyRetain
 }
 
 func IsCRD(obj client.Object) bool {

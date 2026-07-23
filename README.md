@@ -5,13 +5,15 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 ## Features
 
 - **Helm / Kustomize / Template** three deployment modes via `Instance` CR
-- **Post-rendering pipeline**: namespace enforcement, label injection, extensions, pause control, dashboard annotation
+- **Post-rendering pipeline**: namespace enforcement, instance identity, opt-in extensions, pause control, lifecycle strategies, dashboard resources
 - **Permission control**: cluster-scoped and cross-namespace resources are denied by default; allow per namespace via startup flag `--allow-cluster-scoped-namespaces` or annotation `installer.xiaoshiai.cn/allow-cluster-scoped: "true"`
-- **Common labels**: injected from `values.global.commonLabels` into all rendered resources
+- **Common metadata extension**: explicitly injects `values.global.commonLabels` and `values.global.commonAnnotations` into resources and Pod templates; `app.kubernetes.io/instance` is always enforced independently
 - **Dependency management**: instance dependencies via `spec.dependencies`
 - **Values from external sources**: reference ConfigMap / Secret via `spec.valuesFrom`
 - **Immutable chart artifacts**: install Helm charts from a same-namespace immutable Secret with SHA-256 verification
-- **Workload status tracking**: endpoints, states, summary extracted from managed resources
+- **Pause and resume**: supports Deployment, StatefulSet, Job, CronJob, and DaemonSet through `values.global.paused`
+- **Workload status tracking**: endpoints, states, and summary are computed from managed resources with CEL expressions supplied through `Instance` annotations
+- **Lifecycle strategies**: per-resource upgrade `Retain` / `Recreate` and remove `Retain`
 
 ## Installation
 

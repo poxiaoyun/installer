@@ -109,9 +109,6 @@ type InstanceStatus struct {
 	CreationTimestamp time.Time
 	UpgradeTimestamp  time.Time
 	Resources         []ManagedResource
-
-	// ChartAnnotations from Chart.yaml metadata annotations.
-	ChartAnnotations map[string]string
 }
 
 type ManagedResource = appsv1.ManagedResource

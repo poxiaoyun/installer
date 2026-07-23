@@ -211,9 +211,6 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err != nil {
 		instance.Status.Phase = appsv1.PhaseFailed
 		instance.Status.Message = err.Error()
-	} else {
-		// clear message on success
-		instance.Status.Message = ""
 	}
 
 	// Always update ObservedGeneration after sync attempt, regardless of success/failure
@@ -386,7 +383,8 @@ func validateInstanceSource(instance *appsv1.Instance) error {
 }
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
-// The pipeline order is: Namespace → Extensions (Labels, NodePort, ...) → Paused → Dashboard.
+// The pipeline order is: Dashboard generation → Namespace → instance identity →
+// Extensions (CommonMetadata, ...) → Paused.
 func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
 	var modifiers []postrender.ObjectModifier
 
@@ -399,14 +397,18 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 		RESTMapper:          r.Client.RESTMapper(),
 	})
 
+	// Instance identity is a platform invariant used by dynamic resource watches.
+	modifiers = append(modifiers, &postrender.InstanceIdentityRenderer{
+		InstanceName: instance.Name,
+	})
+
 	// Extension processing — dispatches to registered handlers by Kind.
 	modifiers = append(modifiers, &postrender.ExtensionRenderer{
 		Extensions: instance.Spec.Extensions,
 		Handlers: map[string]postrender.ExtensionHandler{
-			"NodePort": postrender.ExtensionHandlerFunc(postrender.HandleNodePort),
-			"Labels": &postrender.LabelsHandler{
-				InstanceName: instance.Name,
-				CommonLabels: getGlobalCommonLabels(values),
+			"CommonMetadata": &postrender.CommonMetadataHandler{
+				CommonLabels:      getGlobalCommonLabels(values),
+				CommonAnnotations: getGlobalCommonAnnotations(values),
 			},
 		},
 	})
@@ -417,9 +419,11 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 		modifiers = append(modifiers, &postrender.PausedRenderer{Paused: true})
 	}
 
+	// Chart-derived resources such as dashboard ConfigMaps are appended before
+	// object modifiers so they receive the same namespace and common metadata.
 	chain := install.PostRendererChain{
-		postrender.CompositeRenderer{Modifiers: modifiers},
 		postrender.DashboardPostRenderer{Name: instance.Name, Namespace: instance.Namespace},
+		postrender.CompositeRenderer{Modifiers: modifiers},
 	}
 	return install.WithPostRendererIdentity(chain, postRendererIdentity(instance.Spec.Extensions, allowClusterScoped))
 }
@@ -430,7 +434,7 @@ func postRendererIdentity(extensions []appsv1.Extension, allowClusterScoped bool
 		Extensions         []appsv1.Extension `json:"extensions,omitempty"`
 		AllowClusterScoped bool               `json:"allowClusterScoped"`
 	}{
-		Version:            1,
+		Version:            3,
 		Extensions:         extensions,
 		AllowClusterScoped: allowClusterScoped,
 	}
@@ -451,11 +455,20 @@ func getGlobalPaused(values map[string]any) bool {
 
 // getGlobalCommonLabels reads global.commonLabels from values.
 func getGlobalCommonLabels(values map[string]any) map[string]string {
+	return getGlobalStringMap(values, "commonLabels")
+}
+
+// getGlobalCommonAnnotations reads global.commonAnnotations from values.
+func getGlobalCommonAnnotations(values map[string]any) map[string]string {
+	return getGlobalStringMap(values, "commonAnnotations")
+}
+
+func getGlobalStringMap(values map[string]any, key string) map[string]string {
 	global, ok := values["global"].(map[string]any)
 	if !ok {
 		return nil
 	}
-	raw, ok := global["commonLabels"].(map[string]any)
+	raw, ok := global[key].(map[string]any)
 	if !ok {
 		return nil
 	}

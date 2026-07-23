@@ -14,6 +14,7 @@ type CELData struct {
 
 func EvalCELExpression(expr string, data CELData) (any, error) {
 	envs := []cel.EnvOption{
+		cel.OptionalTypes(),
 		cel.Variable("instance", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("resources", cel.ListType(cel.DynType)),
 		cel.Variable("values", cel.MapType(cel.StringType, cel.DynType)),
