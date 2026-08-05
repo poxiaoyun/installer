@@ -260,6 +260,71 @@ func TestValidateInstanceSource(t *testing.T) {
 	}
 }
 
+func TestResolveValuesInjectsInstanceRuntimeValues(t *testing.T) {
+	replicas := func(value int32) *int32 { return &value }
+	tests := []struct {
+		name           string
+		instance       *appsv1.Instance
+		wantReplicas   int32
+		wantPaused     bool
+		wantGlobalKeep string
+	}{
+		{
+			name:         "default replicas",
+			instance:     &appsv1.Instance{},
+			wantReplicas: 1,
+		},
+		{
+			name: "zero replicas does not derive paused",
+			instance: &appsv1.Instance{Spec: appsv1.InstanceSpec{
+				Replicas: replicas(0),
+			}},
+			wantReplicas: 0,
+		},
+		{
+			name: "instance replicas override user value and preserve paused",
+			instance: &appsv1.Instance{Spec: appsv1.InstanceSpec{
+				Replicas: replicas(3),
+				Values: appsv1.Values{Object: map[string]any{
+					"global": map[string]any{
+						"replicas": int64(9),
+						"paused":   true,
+						"keep":     "value",
+					},
+				}},
+			}},
+			wantReplicas:   3,
+			wantPaused:     true,
+			wantGlobalKeep: "value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			values, err := (&InstanceReconciler{}).resolveValues(t.Context(), tt.instance)
+			if err != nil {
+				t.Fatal(err)
+			}
+			global, ok := values["global"].(map[string]any)
+			if !ok {
+				t.Fatalf("global values = %#v", values["global"])
+			}
+			if got := getGlobalReplicas(values); got != tt.wantReplicas {
+				t.Fatalf("global.replicas = %d, want %d", got, tt.wantReplicas)
+			}
+			if _, ok := global["replicas"].(float64); !ok {
+				t.Fatalf("global.replicas has type %T, want float64 JSON number", global["replicas"])
+			}
+			if got, _ := global["paused"].(bool); got != tt.wantPaused {
+				t.Fatalf("global.paused = %v, want %v", got, tt.wantPaused)
+			}
+			if got, _ := global["keep"].(string); got != tt.wantGlobalKeep {
+				t.Fatalf("global.keep = %q, want %q", got, tt.wantGlobalKeep)
+			}
+		})
+	}
+}
+
 func TestCleanNilValues(t *testing.T) {
 	tests := []struct {
 		name     string

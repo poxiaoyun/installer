@@ -25,6 +25,11 @@ spec:
       jsonPath: .status.phase
       name: PHASE
       type: string
+    - description: Instance replicas
+      jsonPath: .status.replicas
+      name: REPLICAS
+      priority: 1
+      type: integer
     - description: App version
       jsonPath: .status.appVersion
       name: APPVERSION
@@ -224,6 +229,15 @@ spec:
               path:
                 description: Path is the path in a tarball to the chart/kustomize.
                 type: string
+              replicas:
+                default: 1
+                description: |-
+                  Replicas is the instance-level desired replica count. Installer injects
+                  this value into values.global.replicas. Pause state remains independently
+                  controlled by values.global.paused.
+                format: int32
+                minimum: 0
+                type: integer
               url:
                 description: URL is the URL of helm repository, git clone url, tarball
                   url, s3 url, etc.
@@ -421,6 +435,12 @@ spec:
               phase:
                 description: Phase is the current state of the release
                 type: string
+              replicas:
+                description: |-
+                  Replicas is the instance-level replica count from the last successful sync.
+                  It is exposed through the scale subresource.
+                format: int32
+                type: integer
               resources:
                 description: Resources is a list of resources created/managed by the
                   instance.
@@ -436,6 +456,11 @@ spec:
                       type: string
                   type: object
                 type: array
+              selector:
+                description: |-
+                  Selector identifies the Pods managed by this Instance and is exposed
+                  through the scale subresource.
+                type: string
               states:
                 description: States contains the status of each workload component
                   (Deployment, StatefulSet, etc.)
@@ -481,6 +506,10 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
       status: {}
 
 ---

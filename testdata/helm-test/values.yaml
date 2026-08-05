@@ -1,6 +1,7 @@
 global:
   imagePullSecrets: []
   storageClass: standard
+  paused: false
 
 foo:
   enabled: true

@@ -413,7 +413,7 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 		},
 	})
 
-	// Paused — scale down workloads when global.paused=true
+	// Paused remains an independent control from the desired replica count.
 	paused := getGlobalPaused(values)
 	if paused {
 		modifiers = append(modifiers, &postrender.PausedRenderer{Paused: true})
@@ -443,7 +443,28 @@ func postRendererIdentity(extensions []appsv1.Extension, allowClusterScoped bool
 	return hex.EncodeToString(digest[:])
 }
 
-// getGlobalPaused reads global.paused from values.
+// getGlobalReplicas reads the installer-injected global.replicas value.
+// Missing or malformed values fail open to the default running state.
+func getGlobalReplicas(values map[string]any) int32 {
+	global, ok := values["global"].(map[string]any)
+	if !ok {
+		return 1
+	}
+	switch replicas := global["replicas"].(type) {
+	case int:
+		return int32(replicas)
+	case int32:
+		return replicas
+	case int64:
+		return int32(replicas)
+	case float64:
+		return int32(replicas)
+	default:
+		return 1
+	}
+}
+
+// getGlobalPaused reads the independent global.paused control value.
 func getGlobalPaused(values map[string]any) bool {
 	global, ok := values["global"].(map[string]any)
 	if !ok {
@@ -615,7 +636,26 @@ func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1
 
 	// clean nil values
 	base = cleanNilValues(base)
+
+	// Instance replicas are platform-owned runtime values. global.paused is an
+	// independent chart value and must remain unchanged.
+	replicas := desiredInstanceReplicas(instance)
+	base = mergeMaps(base, map[string]any{
+		"global": map[string]any{
+			// Values are JSON-like and Helm persists numbers through JSON. Use
+			// the canonical decoded representation so release comparisons stay
+			// stable across storage round trips.
+			"replicas": float64(replicas),
+		},
+	})
 	return base, nil
+}
+
+func desiredInstanceReplicas(instance *appsv1.Instance) int32 {
+	if instance.Spec.Replicas == nil {
+		return 1
+	}
+	return *instance.Spec.Replicas
 }
 
 // resolveAuth resolves repository credentials from the Instance spec.

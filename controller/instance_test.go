@@ -6,6 +6,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -128,6 +129,59 @@ var _ = Describe("Basic Plugin tests", func() {
 		}
 		err = waitAllRemoved(ctx)
 		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+var _ = Describe("Instance scale subresource", func() {
+	It("scales the instance independently from the paused value", func() {
+		instance := &appsv1.Instance{
+			ObjectMeta: metav1.ObjectMeta{Name: "scale-test", Namespace: "default"},
+			Spec: appsv1.InstanceSpec{
+				Kind:    appsv1.InstanceKindHelm,
+				Path:    "testdata/helm-test",
+				URL:     "file://" + testhelmdir,
+				Version: "v0.0.0",
+			},
+		}
+		Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+		Expect(waitForPhase(ctx, instance, appsv1.PhaseInstalled)).To(Succeed())
+
+		scale := &autoscalingv1.Scale{}
+		Expect(k8sClient.SubResource("scale").Get(ctx, instance, scale)).To(Succeed())
+		Expect(scale.Spec.Replicas).To(Equal(int32(1)))
+		Expect(scale.Status.Replicas).To(Equal(int32(1)))
+		Expect(scale.Status.Selector).To(Equal("app.kubernetes.io/instance=scale-test"))
+		configMap := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "scale-test-cm"}, configMap)).To(Succeed())
+		Expect(configMap.Data).To(HaveKeyWithValue("global-replicas", "1"))
+		Expect(configMap.Data).To(HaveKeyWithValue("global-paused", "false"))
+
+		scale.Spec.Replicas = 0
+		Expect(k8sClient.SubResource("scale").Update(ctx, instance, client.WithSubResourceBody(scale))).To(Succeed())
+		Eventually(func() int32 {
+			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)
+			return instance.Status.Replicas
+		}, 30*time.Second, 500*time.Millisecond).Should(Equal(int32(0)))
+		Expect(instance.Status.Phase).To(Equal(appsv1.PhaseInstalled))
+		Expect(instance.Status.Replicas).To(Equal(int32(0)))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap)).To(Succeed())
+		Expect(configMap.Data).To(HaveKeyWithValue("global-replicas", "0"))
+		Expect(configMap.Data).To(HaveKeyWithValue("global-paused", "false"))
+
+		Expect(k8sClient.SubResource("scale").Get(ctx, instance, scale)).To(Succeed())
+		scale.Spec.Replicas = 2
+		Expect(k8sClient.SubResource("scale").Update(ctx, instance, client.WithSubResourceBody(scale))).To(Succeed())
+		Eventually(func() int32 {
+			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)
+			return instance.Status.Replicas
+		}, 30*time.Second, 500*time.Millisecond).Should(Equal(int32(2)))
+		Expect(instance.Status.Replicas).To(Equal(int32(2)))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap)).To(Succeed())
+		Expect(configMap.Data).To(HaveKeyWithValue("global-replicas", "2"))
+		Expect(configMap.Data).To(HaveKeyWithValue("global-paused", "false"))
+
+		Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
+		Expect(waitAllRemoved(ctx)).To(Succeed())
 	})
 })
 

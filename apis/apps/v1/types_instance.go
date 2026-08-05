@@ -10,8 +10,10 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="VERSION",type="string",JSONPath=".status.version",description="Chart version"
 // +kubebuilder:printcolumn:name="PHASE",type="string",JSONPath=".status.phase",description="Current phase"
+// +kubebuilder:printcolumn:name="REPLICAS",type="integer",JSONPath=".status.replicas",description="Instance replicas",priority=1
 // +kubebuilder:printcolumn:name="APPVERSION",type="string",JSONPath=".status.appVersion",description="App version",priority=1
 // +kubebuilder:printcolumn:name="UPDATE",type="date",JSONPath=".status.upgradeTimestamp",description="Last upgrade"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp",description="Creation time"
@@ -35,6 +37,13 @@ type InstanceList struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.artifact) || !has(self.kind) || self.kind == 'helm'",message="artifact is only supported for helm instances"
 // +kubebuilder:validation:XValidation:rule="!has(self.artifact) || ((!has(self.url) || size(self.url) == 0) && (!has(self.version) || size(self.version) == 0) && (!has(self.chart) || size(self.chart) == 0) && (!has(self.path) || size(self.path) == 0) && !has(self.auth))",message="artifact cannot be combined with url, version, chart, path, or auth"
 type InstanceSpec struct {
+	// Replicas is the instance-level desired replica count. Installer injects
+	// this value into values.global.replicas. Pause state remains independently
+	// controlled by values.global.paused.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// Kind instance kind.
 	// +kubebuilder:default=helm
 	Kind InstanceKind `json:"kind,omitempty"`
@@ -162,6 +171,14 @@ type InstanceStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Replicas is the instance-level replica count from the last successful sync.
+	// It is exposed through the scale subresource.
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// Selector identifies the Pods managed by this Instance and is exposed
+	// through the scale subresource.
+	Selector string `json:"selector,omitempty"`
 
 	// Phase is the current state of the release
 	Phase Phase `json:"phase,omitempty"`

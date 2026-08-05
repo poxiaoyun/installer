@@ -11,7 +11,7 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 - **Dependency management**: instance dependencies via `spec.dependencies`
 - **Values from external sources**: reference ConfigMap / Secret via `spec.valuesFrom`
 - **Immutable chart artifacts**: install Helm charts from a same-namespace immutable Secret with SHA-256 verification
-- **Pause and resume**: supports Deployment, StatefulSet, Job, CronJob, and DaemonSet through `values.global.paused`
+- **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet
 - **Workload status tracking**: endpoints, states, and summary are computed from managed resources with CEL expressions supplied through `Instance` annotations
 - **Lifecycle strategies**: per-resource upgrade `Retain` / `Recreate` and remove `Retain`
 

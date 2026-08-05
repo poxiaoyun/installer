@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -132,6 +133,114 @@ func TestSyncStatusKeepsExpressionFailureSeparateFromRuntimePhase(t *testing.T) 
 	expressionsReady := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionExpressionsReady)
 	if expressionsReady == nil || expressionsReady.Status != metav1.ConditionFalse || expressionsReady.Reason != "ExpressionEvaluationFailed" {
 		t.Fatalf("expressions ready condition = %#v", expressionsReady)
+	}
+}
+
+func TestSyncStatusUsesIndependentPausedValue(t *testing.T) {
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Status: appsv1.InstanceStatus{Values: appsv1.Values{Object: map[string]any{
+			"global": map[string]any{"replicas": int32(3), "paused": true},
+		}}},
+	}
+
+	if err := (&InstanceReconciler{}).syncStatus(t.Context(), instance); err != nil {
+		t.Fatal(err)
+	}
+	if instance.Status.Phase != appsv1.PhasePaused {
+		t.Fatalf("phase = %q, want %q", instance.Status.Phase, appsv1.PhasePaused)
+	}
+	if instance.Status.Replicas != 3 {
+		t.Fatalf("status replicas = %d, want 3", instance.Status.Replicas)
+	}
+	if instance.Status.Selector != "app.kubernetes.io/instance=demo" {
+		t.Fatalf("status selector = %q", instance.Status.Selector)
+	}
+	ready := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != "Paused" {
+		t.Fatalf("ready condition = %#v", ready)
+	}
+}
+
+func TestSyncStatusDoesNotTreatZeroReplicasAsPaused(t *testing.T) {
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Status: appsv1.InstanceStatus{Values: appsv1.Values{Object: map[string]any{
+			"global": map[string]any{"replicas": int32(0), "paused": false},
+		}}},
+	}
+
+	if err := (&InstanceReconciler{}).syncStatus(t.Context(), instance); err != nil {
+		t.Fatal(err)
+	}
+	if instance.Status.Phase != appsv1.PhaseInstalled {
+		t.Fatalf("phase = %q, want %q", instance.Status.Phase, appsv1.PhaseInstalled)
+	}
+	if instance.Status.Replicas != 0 {
+		t.Fatalf("status replicas = %d, want 0", instance.Status.Replicas)
+	}
+}
+
+func TestSyncStatusReportsScaledToZeroDeploymentAsHealthy(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := k8sappsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	zero := int32(0)
+	deployment := &k8sappsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec:       k8sappsv1.DeploymentSpec{Replicas: &zero},
+		Status:     k8sappsv1.DeploymentStatus{Replicas: 0, ReadyReplicas: 0},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment).Build()
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Status: appsv1.InstanceStatus{
+			Values: appsv1.Values{Object: map[string]any{
+				"global": map[string]any{"replicas": int32(0), "paused": false},
+			}},
+			Resources: []appsv1.ManagedResource{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Namespace:  "default",
+				Name:       "web",
+			}},
+		},
+	}
+
+	if err := (&InstanceReconciler{Client: cli}).syncStatus(t.Context(), instance); err != nil {
+		t.Fatal(err)
+	}
+	if len(instance.Status.States) != 1 || instance.Status.States[0].Status != "ScaledToZero" {
+		t.Fatalf("states = %#v, want ScaledToZero", instance.Status.States)
+	}
+	if instance.Status.Phase != appsv1.PhaseHealthy {
+		t.Fatalf("phase = %q, want %q", instance.Status.Phase, appsv1.PhaseHealthy)
+	}
+	ready := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionTrue {
+		t.Fatalf("ready condition = %#v", ready)
+	}
+}
+
+func TestDefaultDeploymentStateReportsScalingBeforeDesiredReplicasExist(t *testing.T) {
+	two := int32(2)
+	deployment := &k8sappsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec:       k8sappsv1.DeploymentSpec{Replicas: &two},
+		Status:     k8sappsv1.DeploymentStatus{Replicas: 0, ReadyReplicas: 0},
+	}
+	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := &unstructured.Unstructured{Object: object}
+	resource.SetAPIVersion("apps/v1")
+	resource.SetKind("Deployment")
+
+	states := GetDefaultStates([]*unstructured.Unstructured{resource})
+	if len(states) != 1 || states[0].Status != "Scaling" {
+		t.Fatalf("states = %#v, want Scaling", states)
 	}
 }
 

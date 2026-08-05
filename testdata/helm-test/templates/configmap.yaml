@@ -8,3 +8,5 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
 data:
   test-key: "test-value"
+  global-replicas: {{ .Values.global.replicas | quote }}
+  global-paused: {{ .Values.global.paused | quote }}

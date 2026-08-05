@@ -38,11 +38,12 @@ const (
 	StateStatusUnhealthy        = "Unhealthy"
 	StateStatusError            = "Error"
 
-	StateStatusSucceeded = "Succeeded"
-	StateStatusActive    = "Active"
-	StateStatusHealthy   = "Healthy"
-	StateCompleted       = "Completed"
-	StateStatusRunning   = "Running"
+	StateStatusSucceeded    = "Succeeded"
+	StateStatusActive       = "Active"
+	StateStatusHealthy      = "Healthy"
+	StateStatusScaledToZero = "ScaledToZero"
+	StateCompleted          = "Completed"
+	StateStatusRunning      = "Running"
 )
 
 const (
@@ -70,8 +71,10 @@ func (r *InstanceReconciler) syncStatus(ctx context.Context, instance *appsv1.In
 		logr.FromContextOrDiscard(ctx).Error(expressionErr, "check annotations failed")
 	}
 
-	paused := getmap(instance.Status.Values.Object, "global", "paused")
-	if paused == true || paused == "true" {
+	replicas := getGlobalReplicas(instance.Status.Values.Object)
+	instance.Status.Replicas = replicas
+	instance.Status.Selector = fmt.Sprintf("app.kubernetes.io/instance=%s", instance.Name)
+	if getGlobalPaused(instance.Status.Values.Object) {
 		instance.Status.Phase = appsv1.PhasePaused
 		instance.Status.Message = ""
 		r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, "Paused", "Instance is paused")
@@ -173,6 +176,7 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 		case StateStatusRunning,
 			StateStatusHealthy,
 			StateStatusActive,
+			StateStatusScaledToZero,
 			StateStatusSucceeded,
 			StateCompleted:
 			// Explicitly healthy.
@@ -267,7 +271,7 @@ func getUnhealthyMessage(states []appsv1.State) string {
 
 func isStateHealthy(status string) bool {
 	switch status {
-	case StateStatusRunning, StateStatusHealthy, StateStatusActive, StateStatusSucceeded, StateCompleted:
+	case StateStatusRunning, StateStatusHealthy, StateStatusActive, StateStatusScaledToZero, StateStatusSucceeded, StateCompleted:
 		return true
 	}
 	return false
@@ -342,7 +346,7 @@ func getDeploymentState(resource *unstructured.Unstructured) appsv1.State {
 	state := appsv1.State{
 		Name:   deployment.Name,
 		Kind:   "Deployment",
-		Status: calcReplicasState(deployment.Status.Replicas, deployment.Status.ReadyReplicas),
+		Status: calcReplicasState(replicasOrDefault(deployment.Spec.Replicas), deployment.Status.Replicas, deployment.Status.ReadyReplicas),
 	}
 	messages := []string{}
 	for _, c := range deployment.Status.Conditions {
@@ -367,14 +371,24 @@ func getStatefulSetState(resource *unstructured.Unstructured) appsv1.State {
 	state := appsv1.State{
 		Name:   statefulset.Name,
 		Kind:   "StatefulSet",
-		Status: calcReplicasState(statefulset.Status.Replicas, statefulset.Status.ReadyReplicas),
+		Status: calcReplicasState(replicasOrDefault(statefulset.Spec.Replicas), statefulset.Status.Replicas, statefulset.Status.ReadyReplicas),
 	}
 	return state
 }
 
-func calcReplicasState(desired int32, ready int32) string {
-	if desired == 0 {
-		return StateStatusPaused
+func replicasOrDefault(replicas *int32) int32 {
+	if replicas == nil {
+		return 1
+	}
+	return *replicas
+}
+
+func calcReplicasState(desired, current, ready int32) string {
+	if desired == 0 && current == 0 {
+		return StateStatusScaledToZero
+	}
+	if current != desired {
+		return StateStatusScaling
 	}
 	if ready == desired {
 		return StateStatusRunning
@@ -393,7 +407,7 @@ func getDaemonSetState(resource *unstructured.Unstructured) appsv1.State {
 	return appsv1.State{
 		Name:   daemonset.Name,
 		Kind:   "DaemonSet",
-		Status: calcReplicasState(daemonset.Status.DesiredNumberScheduled, daemonset.Status.NumberReady),
+		Status: calcReplicasState(daemonset.Status.DesiredNumberScheduled, daemonset.Status.CurrentNumberScheduled, daemonset.Status.NumberReady),
 	}
 }
 
