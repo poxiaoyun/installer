@@ -435,8 +435,8 @@ spec:
                 type: string
               replicas:
                 description: |-
-                  Replicas is the instance-level replica count from the last successful sync.
-                  It is exposed through the scale subresource.
+                  Replicas is the number of current non-terminal Pods matching Selector.
+                  It is exposed as the observed replica count through the scale subresource.
                 format: int32
                 type: integer
               resources:
@@ -456,8 +456,9 @@ spec:
                 type: array
               selector:
                 description: |-
-                  Selector identifies the Pods managed by this Instance and is exposed
-                  through the scale subresource.
+                  Selector identifies the Pods represented by Replicas. It combines the
+                  instance identity label with any configured scale Pod selector and is
+                  exposed through the scale subresource.
                 type: string
               states:
                 description: States contains the status of each workload component

@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"xiaoshiai.cn/installer/apis/apps"
 	"xiaoshiai.cn/installer/install"
 )
 
@@ -65,7 +66,7 @@ func TestSyncDiffRetainsExistingResourceOnUpgrade(t *testing.T) {
 	base := fake.NewClientBuilder().WithRuntimeObjects(live).Build()
 	tracking := &trackingClient{Client: base}
 	desired := testResource("settings", "new", map[string]string{
-		install.AnnotationUpgradeStrategy: install.UpgradeStrategyRetain,
+		apps.AnnotationUpgradeStrategy: install.UpgradeStrategyRetain,
 	})
 
 	managed, err := (&ClientApply{Client: tracking}).SyncDiff(ctx, DiffResult{Applys: []*unstructured.Unstructured{desired}}, testSyncOptions())
@@ -94,7 +95,7 @@ func TestSyncDiffRecreatesExistingResource(t *testing.T) {
 	base := fake.NewClientBuilder().WithRuntimeObjects(live).Build()
 	tracking := &trackingClient{Client: base}
 	desired := testResource("settings", "new", map[string]string{
-		install.AnnotationUpgradeStrategy: install.UpgradeStrategyRecreate,
+		apps.AnnotationUpgradeStrategy: install.UpgradeStrategyRecreate,
 	})
 
 	_, err := (&ClientApply{Client: tracking}).SyncDiff(ctx, DiffResult{Applys: []*unstructured.Unstructured{desired}}, testSyncOptions())
@@ -120,7 +121,7 @@ func TestSyncDiffRecreatesExistingResource(t *testing.T) {
 func TestSyncDiffRetainsRemovedLiveResource(t *testing.T) {
 	ctx := context.Background()
 	live := testResource("settings", "old", map[string]string{
-		install.AnnotationRemoveStrategy: install.RemoveStrategyRetain,
+		apps.AnnotationRemoveStrategy: install.RemoveStrategyRetain,
 	})
 	base := fake.NewClientBuilder().WithRuntimeObjects(live).Build()
 	tracking := &trackingClient{Client: base}
@@ -150,7 +151,7 @@ func TestSyncDiffRejectsInvalidStrategyBeforeMutation(t *testing.T) {
 	tracking := &trackingClient{Client: base}
 	first := testResource("first", "one", nil)
 	invalid := testResource("invalid", "two", map[string]string{
-		install.AnnotationUpgradeStrategy: "Replace",
+		apps.AnnotationUpgradeStrategy: "Replace",
 	})
 
 	_, err := (&ClientApply{Client: tracking}).SyncDiff(ctx, DiffResult{Creats: []*unstructured.Unstructured{first, invalid}}, testSyncOptions())
@@ -165,13 +166,13 @@ func TestSyncDiffRejectsInvalidStrategyBeforeMutation(t *testing.T) {
 func TestIsLifecycleStrategy(t *testing.T) {
 	obj := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap"}}
 	obj.SetAnnotations(map[string]string{
-		install.AnnotationUpgradeStrategy: install.UpgradeStrategyRetain,
-		install.AnnotationRemoveStrategy:  install.RemoveStrategyRetain,
+		apps.AnnotationUpgradeStrategy: install.UpgradeStrategyRetain,
+		apps.AnnotationRemoveStrategy:  install.RemoveStrategyRetain,
 	})
 	if !IsSkipUpdate(obj) || IsRecreateUpdate(obj) || !IsSkipDelete(obj) {
 		t.Fatal("Retain strategies were not recognized")
 	}
-	obj.SetAnnotations(map[string]string{install.AnnotationUpgradeStrategy: install.UpgradeStrategyRecreate})
+	obj.SetAnnotations(map[string]string{apps.AnnotationUpgradeStrategy: install.UpgradeStrategyRecreate})
 	if IsSkipUpdate(obj) || !IsRecreateUpdate(obj) || IsSkipDelete(obj) {
 		t.Fatal("Recreate strategy was not recognized")
 	}

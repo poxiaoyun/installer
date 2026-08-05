@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
 
@@ -122,8 +123,8 @@ spec:
 	}
 	renderer := &CommonMetadataRenderer{
 		CommonLabels: map[string]string{
-			"team":        "platform",
-			LabelInstance: "attempted-override",
+			"team":             "platform",
+			apps.LabelInstance: "attempted-override",
 		},
 		CommonAnnotations: map[string]string{
 			"note":  "common",
@@ -138,7 +139,7 @@ spec:
 	}
 
 	for _, obj := range got {
-		assertStringMapValue(t, obj.GetLabels(), LabelInstance, "sample", obj.GetKind()+" top-level labels")
+		assertStringMapValue(t, obj.GetLabels(), apps.LabelInstance, "sample", obj.GetKind()+" top-level labels")
 		assertStringMapValue(t, obj.GetLabels(), "team", "platform", obj.GetKind()+" top-level labels")
 		assertStringMapValue(t, obj.GetAnnotations(), "note", "common", obj.GetKind()+" top-level annotations")
 		assertStringMapValue(t, obj.GetAnnotations(), "owner", "apps", obj.GetKind()+" top-level annotations")
@@ -148,13 +149,13 @@ spec:
 	assertStringMapValue(t, config.GetLabels(), "chart", "original", "ConfigMap labels")
 
 	pod := objectByName(t, got, "pod")
-	assertStringMapValue(t, pod.GetLabels(), LabelInstance, "sample", "Pod labels")
+	assertStringMapValue(t, pod.GetLabels(), apps.LabelInstance, "sample", "Pod labels")
 
 	for _, name := range []string{"deployment", "statefulset", "daemonset", "replicaset", "job"} {
 		obj := objectByName(t, got, name)
 		labels := nestedStringMap(t, obj.Object, "spec", "template", "metadata", "labels")
 		annotations := nestedStringMap(t, obj.Object, "spec", "template", "metadata", "annotations")
-		assertStringMapValue(t, labels, LabelInstance, "sample", name+" pod template labels")
+		assertStringMapValue(t, labels, apps.LabelInstance, "sample", name+" pod template labels")
 		assertStringMapValue(t, labels, "team", "platform", name+" pod template labels")
 		assertStringMapValue(t, annotations, "owner", "apps", name+" pod template annotations")
 	}
@@ -162,12 +163,12 @@ spec:
 	cronjob := objectByName(t, got, "cronjob")
 	cronLabels := nestedStringMap(t, cronjob.Object, "spec", "jobTemplate", "spec", "template", "metadata", "labels")
 	cronAnnotations := nestedStringMap(t, cronjob.Object, "spec", "jobTemplate", "spec", "template", "metadata", "annotations")
-	assertStringMapValue(t, cronLabels, LabelInstance, "sample", "CronJob pod template labels")
+	assertStringMapValue(t, cronLabels, apps.LabelInstance, "sample", "CronJob pod template labels")
 	assertStringMapValue(t, cronAnnotations, "owner", "apps", "CronJob pod template annotations")
 
 	for _, name := range []string{"deployment", "statefulset", "daemonset", "replicaset", "job"} {
 		selector := nestedStringMap(t, objectByName(t, got, name).Object, "spec", "selector", "matchLabels")
-		if _, found := selector[LabelInstance]; found {
+		if _, found := selector[apps.LabelInstance]; found {
 			t.Errorf("%s selector unexpectedly contains instance label", name)
 		}
 		if _, found := selector["team"]; found {
@@ -187,7 +188,7 @@ spec:
 	statefulset := objectByName(t, got, "statefulset")
 	vctLabels := nestedStringMap(t, statefulset.Object, "spec", "volumeClaimTemplates", "0", "metadata", "labels")
 	vctAnnotations := nestedStringMap(t, statefulset.Object, "spec", "volumeClaimTemplates", "0", "metadata", "annotations")
-	if _, found := vctLabels[LabelInstance]; found {
+	if _, found := vctLabels[apps.LabelInstance]; found {
 		t.Error("volumeClaimTemplate unexpectedly received the instance identity label")
 	}
 	assertStringMapValue(t, vctLabels, "team", "platform", "volumeClaimTemplate labels")
@@ -230,7 +231,7 @@ spec:
 `
 	newObjects := func() []*unstructured.Unstructured { return mustParseObjects(t, manifest) }
 	handler := &CommonMetadataHandler{
-		CommonLabels:      map[string]string{"team": "platform", LabelInstance: "override"},
+		CommonLabels:      map[string]string{"team": "platform", apps.LabelInstance: "override"},
 		CommonAnnotations: map[string]string{"owner": "apps"},
 	}
 
@@ -240,7 +241,7 @@ spec:
 	}
 	templateLabels := nestedStringMap(t, objects[0].Object, "spec", "template", "metadata", "labels")
 	assertStringMapValue(t, templateLabels, "team", "platform", "default pod template labels")
-	if _, exists := templateLabels[LabelInstance]; exists {
+	if _, exists := templateLabels[apps.LabelInstance]; exists {
 		t.Fatal("CommonMetadata extension injected the reserved instance label")
 	}
 	vctLabels := nestedStringMap(t, objects[0].Object, "spec", "volumeClaimTemplates", "0", "metadata", "labels")

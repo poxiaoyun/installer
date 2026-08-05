@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/install"
 )
@@ -79,7 +80,7 @@ func TestSyncInstallAppliesOncePerDesiredState(t *testing.T) {
 	// Runtime expression annotations are evaluated from Instance metadata and do
 	// not change the desired Helm release state.
 	instance.Annotations = map[string]string{
-		appsv1.AnnotationSummaryExpression: `{"source":"instance"}`,
+		apps.AnnotationSummaryExpression: `{"source":"instance"}`,
 	}
 	if err := reconciler.syncInstall(context.Background(), instance); err != nil {
 		t.Fatalf("annotation-only syncInstall() error = %v", err)
@@ -94,7 +95,7 @@ func TestSyncInstallAppliesOncePerDesiredState(t *testing.T) {
 		t.Fatalf("summary source = %q, want instance", got)
 	}
 
-	delete(instance.Annotations, appsv1.AnnotationSummaryExpression)
+	delete(instance.Annotations, apps.AnnotationSummaryExpression)
 	if err := reconciler.syncInstall(context.Background(), instance); err != nil {
 		t.Fatalf("annotation removal syncInstall() error = %v", err)
 	}

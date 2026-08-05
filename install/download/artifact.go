@@ -13,14 +13,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
 
 const (
-	ChartSecretType         corev1.SecretType = "apps.xiaoshiai.cn/helm-chart.v1"
-	ContentDigestAnnotation                   = "apps.xiaoshiai.cn/content-digest"
-	ChartSecretKey                            = "chart.tgz"
-
 	ReasonArtifactSecretNotFound = "ArtifactSecretNotFound"
 	ReasonArtifactSecretInvalid  = "ArtifactSecretInvalid"
 	ReasonArtifactDigestMismatch = "ArtifactDigestMismatch"
@@ -53,8 +50,8 @@ func (l *ArtifactLoader) Load(ctx context.Context, namespace string, artifact *a
 		}
 		return "", "", func() {}, artifactError(reason, "get chart Secret %s/%s: %v", namespace, artifact.SecretRef.Name, err)
 	}
-	if secret.Type != ChartSecretType {
-		return "", "", func() {}, artifactError(ReasonArtifactSecretInvalid, "chart Secret %s/%s has type %q, expected %q", namespace, secret.Name, secret.Type, ChartSecretType)
+	if secret.Type != apps.ChartSecretType {
+		return "", "", func() {}, artifactError(ReasonArtifactSecretInvalid, "chart Secret %s/%s has type %q, expected %q", namespace, secret.Name, secret.Type, apps.ChartSecretType)
 	}
 	if secret.Immutable == nil || !*secret.Immutable {
 		return "", "", func() {}, artifactError(ReasonArtifactSecretInvalid, "chart Secret %s/%s must be immutable", namespace, secret.Name)
@@ -64,7 +61,7 @@ func (l *ArtifactLoader) Load(ctx context.Context, namespace string, artifact *a
 	if !ok || len(archive) == 0 {
 		return "", "", func() {}, artifactError(ReasonArtifactSecretInvalid, "chart Secret %s/%s does not contain non-empty data key %q", namespace, secret.Name, artifact.SecretRef.Key)
 	}
-	annotationDigest := secret.Annotations[ContentDigestAnnotation]
+	annotationDigest := secret.Annotations[apps.ContentDigestAnnotation]
 	actualDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(archive))
 	if artifact.Digest != "" && actualDigest != artifact.Digest {
 		return "", "", func() {}, artifactError(ReasonArtifactDigestMismatch, "chart Secret %s/%s digest mismatch: expected %s, actual %s", namespace, secret.Name, artifact.Digest, actualDigest)

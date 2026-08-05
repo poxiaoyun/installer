@@ -39,7 +39,7 @@ type Options struct {
 
 	// AllowClusterScopedNamespaces is a list of namespaces whose instances are always allowed
 	// to create cluster-scoped resources. Namespaces not in this list can still be allowed
-	// via the "installer.xiaoshiai.cn/allow-cluster-scoped" annotation on the Namespace.
+	// via the "apps.xiaoshiai.cn/allow-cluster-scoped" annotation on the Namespace.
 	AllowClusterScopedNamespaces []string `json:"allowClusterScopedNamespaces,omitempty" description:"Namespaces allowed to create cluster-scoped resources."`
 }
 

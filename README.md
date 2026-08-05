@@ -6,12 +6,12 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 
 - **Helm / Kustomize / Template** three deployment modes via `Instance` CR
 - **Post-rendering pipeline**: namespace enforcement, instance identity, opt-in extensions, pause control, lifecycle strategies, dashboard resources
-- **Permission control**: cluster-scoped and cross-namespace resources are denied by default; allow per namespace via startup flag `--allow-cluster-scoped-namespaces` or annotation `installer.xiaoshiai.cn/allow-cluster-scoped: "true"`
+- **Permission control**: cluster-scoped and cross-namespace resources are denied by default; allow per namespace via startup flag `--allow-cluster-scoped-namespaces` or annotation `apps.xiaoshiai.cn/allow-cluster-scoped: "true"`
 - **Common metadata extension**: explicitly injects `values.global.commonLabels` and `values.global.commonAnnotations` into resources and Pod templates; `app.kubernetes.io/instance` is always enforced independently
 - **Dependency management**: instance dependencies via `spec.dependencies`
 - **Values from external sources**: reference ConfigMap / Secret via `spec.valuesFrom`
 - **Immutable chart artifacts**: install Helm charts from a same-namespace immutable Secret with SHA-256 verification
-- **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet
+- **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; scale status reports the current non-terminal Pods selected by the instance label plus the optional `app.kubernetes.io/scale-pod-selector` annotation; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet
 - **Workload status tracking**: endpoints, states, and summary are computed from managed resources with CEL expressions supplied through `Instance` annotations
 - **Lifecycle strategies**: per-resource upgrade `Retain` / `Recreate` and remove `Retain`
 

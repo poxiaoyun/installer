@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
 
@@ -48,7 +49,7 @@ func (r *CommonMetadataRenderer) ModifyObjects(objects []*unstructured.Unstructu
 	maps.Copy(labels, r.CommonLabels)
 	// Instance identity belongs to InstanceIdentityRenderer and cannot be
 	// overridden through global.commonLabels.
-	delete(labels, LabelInstance)
+	delete(labels, apps.LabelInstance)
 
 	for _, obj := range objects {
 		if len(labels) != 0 {

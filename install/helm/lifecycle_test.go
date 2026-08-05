@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/resource"
+	"xiaoshiai.cn/installer/apis/apps"
 	"xiaoshiai.cn/installer/install"
 	"xiaoshiai.cn/installer/utils"
 )
@@ -133,7 +134,7 @@ func (c *recordingHelmClient) OutputContainerLogsForPodList(
 func helmResource(name, value, upgradeStrategy string) *resource.Info {
 	annotations := map[string]string{}
 	if upgradeStrategy != "" {
-		annotations[install.AnnotationUpgradeStrategy] = upgradeStrategy
+		annotations[apps.AnnotationUpgradeStrategy] = upgradeStrategy
 	}
 	object := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
@@ -292,7 +293,7 @@ func TestLifecycleKubeClientRetainsRemovedResources(t *testing.T) {
 	client := newLifecycleKubeClient(delegate)
 	retained := helmResource("retained", "old", "")
 	retained.Object.(*unstructured.Unstructured).SetAnnotations(map[string]string{
-		install.AnnotationRemoveStrategy: install.RemoveStrategyRetain,
+		apps.AnnotationRemoveStrategy: install.RemoveStrategyRetain,
 	})
 	ordinary := helmResource("ordinary", "old", "")
 

@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/resource"
 	"sigs.k8s.io/yaml"
+	"xiaoshiai.cn/installer/apis/apps"
 	"xiaoshiai.cn/installer/install"
 	"xiaoshiai.cn/installer/utils"
 )
@@ -161,7 +162,7 @@ func (c *lifecycleKubeClient) update(original, target kube.ResourceList, force, 
 			// Read the old value only to detect a Retain transition. The target
 			// was already validated above, so an invalid annotation in a legacy
 			// release must not prevent the user from correcting it.
-			if originalObject.GetAnnotations()[install.AnnotationUpgradeStrategy] == install.UpgradeStrategyRetain {
+			if originalObject.GetAnnotations()[apps.AnnotationUpgradeStrategy] == install.UpgradeStrategyRetain {
 				liveInfo, err := c.getLiveResourceInfo(originalInfo)
 				if err != nil {
 					// A missing retained resource is handled by Helm's normal

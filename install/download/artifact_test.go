@@ -15,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
 
@@ -26,14 +27,14 @@ func TestArtifactLoaderLoad(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "demo-0.1.0",
 			Namespace:   "default",
-			Annotations: map[string]string{ContentDigestAnnotation: digest},
+			Annotations: map[string]string{apps.ContentDigestAnnotation: digest},
 		},
 		Immutable: &immutable,
-		Type:      ChartSecretType,
-		Data:      map[string][]byte{ChartSecretKey: archive},
+		Type:      apps.ChartSecretType,
+		Data:      map[string][]byte{apps.ChartSecretKey: archive},
 	}
 	artifact := &appsv1.Artifact{
-		SecretRef: appsv1.ArtifactSecretRef{Name: secret.Name, Key: ChartSecretKey},
+		SecretRef: appsv1.ArtifactSecretRef{Name: secret.Name, Key: apps.ChartSecretKey},
 		Digest:    digest,
 	}
 	loader := newTestArtifactLoader(t, secret)
@@ -71,7 +72,7 @@ func TestArtifactLoaderAllowsCustomKeyAndOptionalDigests(t *testing.T) {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
 		Immutable:  &immutable,
-		Type:       ChartSecretType,
+		Type:       apps.ChartSecretType,
 		Data:       map[string][]byte{"custom.bundle": archive},
 	}
 	artifact := &appsv1.Artifact{
@@ -99,16 +100,16 @@ func TestArtifactLoaderRejectsInvalidSources(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "demo-0.1.0",
 				Namespace:   "default",
-				Annotations: map[string]string{ContentDigestAnnotation: digest},
+				Annotations: map[string]string{apps.ContentDigestAnnotation: digest},
 			},
 			Immutable: &immutable,
-			Type:      ChartSecretType,
-			Data:      map[string][]byte{ChartSecretKey: archive},
+			Type:      apps.ChartSecretType,
+			Data:      map[string][]byte{apps.ChartSecretKey: archive},
 		}
 	}
 	newArtifact := func() *appsv1.Artifact {
 		return &appsv1.Artifact{
-			SecretRef: appsv1.ArtifactSecretRef{Name: "demo-0.1.0", Key: ChartSecretKey},
+			SecretRef: appsv1.ArtifactSecretRef{Name: "demo-0.1.0", Key: apps.ChartSecretKey},
 			Digest:    digest,
 		}
 	}
@@ -124,18 +125,18 @@ func TestArtifactLoaderRejectsInvalidSources(t *testing.T) {
 		{name: "mutable Secret", withSecret: true, mutate: func(_ *appsv1.Artifact, s *corev1.Secret) { s.Immutable = nil }, wantReason: ReasonArtifactSecretInvalid},
 		{name: "missing data key", withSecret: true, mutate: func(_ *appsv1.Artifact, s *corev1.Secret) { s.Data = nil }, wantReason: ReasonArtifactSecretInvalid},
 		{name: "annotation digest mismatch", withSecret: true, mutate: func(_ *appsv1.Artifact, s *corev1.Secret) {
-			s.Annotations[ContentDigestAnnotation] = digestOf([]byte("other"))
+			s.Annotations[apps.ContentDigestAnnotation] = digestOf([]byte("other"))
 		}, wantReason: ReasonArtifactDigestMismatch},
 		{name: "content digest mismatch", withSecret: true, mutate: func(a *appsv1.Artifact, s *corev1.Secret) {
 			a.Digest = digestOf([]byte("other"))
-			s.Annotations[ContentDigestAnnotation] = a.Digest
+			s.Annotations[apps.ContentDigestAnnotation] = a.Digest
 		}, wantReason: ReasonArtifactDigestMismatch},
 		{name: "unmatched digest", withSecret: true, mutate: func(a *appsv1.Artifact, _ *corev1.Secret) { a.Digest = "sha256:nope" }, wantReason: ReasonArtifactDigestMismatch},
 		{name: "empty key", withSecret: true, mutate: func(a *appsv1.Artifact, _ *corev1.Secret) { a.SecretRef.Key = "" }, wantReason: ReasonArtifactSecretInvalid},
 		{name: "invalid chart", withSecret: true, mutate: func(a *appsv1.Artifact, s *corev1.Secret) {
-			s.Data[ChartSecretKey] = []byte("not a chart")
-			a.Digest = digestOf(s.Data[ChartSecretKey])
-			s.Annotations[ContentDigestAnnotation] = a.Digest
+			s.Data[apps.ChartSecretKey] = []byte("not a chart")
+			a.Digest = digestOf(s.Data[apps.ChartSecretKey])
+			s.Annotations[apps.ContentDigestAnnotation] = a.Digest
 		}, wantReason: ReasonArtifactLoadFailed},
 	}
 

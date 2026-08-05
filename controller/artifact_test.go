@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/install/download"
 )
@@ -32,7 +33,7 @@ var _ = Describe("Chart Secret artifacts", func() {
 			Spec: appsv1.InstanceSpec{
 				Kind: appsv1.InstanceKindHelm,
 				Artifact: &appsv1.Artifact{
-					SecretRef: appsv1.ArtifactSecretRef{Name: secretV1.Name, Key: download.ChartSecretKey},
+					SecretRef: appsv1.ArtifactSecretRef{Name: secretV1.Name, Key: apps.ChartSecretKey},
 					Digest:    digestV1,
 				},
 			},
@@ -70,7 +71,7 @@ var _ = Describe("Chart Secret artifacts", func() {
 		Expect(k8sClient.Create(ctx, invalidSecret)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
 		instance.Spec.Artifact = &appsv1.Artifact{
-			SecretRef: appsv1.ArtifactSecretRef{Name: invalidSecret.Name, Key: download.ChartSecretKey},
+			SecretRef: appsv1.ArtifactSecretRef{Name: invalidSecret.Name, Key: apps.ChartSecretKey},
 			Digest:    invalidDigest,
 		}
 		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
@@ -93,7 +94,7 @@ var _ = Describe("Chart Secret artifacts", func() {
 		Expect(k8sClient.Create(ctx, secretV2)).To(Succeed())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
 		instance.Spec.Artifact = &appsv1.Artifact{
-			SecretRef: appsv1.ArtifactSecretRef{Name: secretV2.Name, Key: download.ChartSecretKey},
+			SecretRef: appsv1.ArtifactSecretRef{Name: secretV2.Name, Key: apps.ChartSecretKey},
 			Digest:    digestV2,
 		}
 		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
@@ -111,7 +112,7 @@ var _ = Describe("Chart Secret artifacts", func() {
 		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
 		eventuallyInstalledArtifact(instance, digestV2, "0.1.0")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cm), cm)).To(Succeed())
-		Expect(cm.Labels["app.kubernetes.io/instance"]).To(Equal(instance.Name))
+		Expect(cm.Labels[apps.LabelInstance]).To(Equal(instance.Name))
 		releaseV3 := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sh.helm.release.v1.artifact-demo.v3", Namespace: namespace}}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(releaseV3), releaseV3)).To(Succeed())
 
@@ -183,11 +184,11 @@ func controllerChartSecret(namespace, name string, archive []byte, digest string
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   namespace,
-			Annotations: map[string]string{download.ContentDigestAnnotation: digest},
+			Annotations: map[string]string{apps.ContentDigestAnnotation: digest},
 		},
 		Immutable: &immutable,
-		Type:      download.ChartSecretType,
-		Data:      map[string][]byte{download.ChartSecretKey: archive},
+		Type:      apps.ChartSecretType,
+		Data:      map[string][]byte{apps.ChartSecretKey: archive},
 	}
 }
 

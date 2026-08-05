@@ -17,6 +17,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,34 +25,7 @@ import (
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 )
 
-const (
-	StateStatusDegraded = "Degraded"
-	StateStatusUpdating = "Updating"
-	StateStatusScaling  = "Scaling"
-
-	StateStatusPaused  = "Paused"
-	StateStatusUnknown = "Unknown"
-
-	StateStatusPending          = "Pending"
-	StateStatusCrashLoopBackOff = "CrashLoopBackOff"
-	StateStatusFailed           = "Failed"
-	StateStatusUnhealthy        = "Unhealthy"
-	StateStatusError            = "Error"
-
-	StateStatusSucceeded    = "Succeeded"
-	StateStatusActive       = "Active"
-	StateStatusHealthy      = "Healthy"
-	StateStatusScaledToZero = "ScaledToZero"
-	StateCompleted          = "Completed"
-	StateStatusRunning      = "Running"
-)
-
-const (
-	AnnotationIngressPorts = "cloud.xiaoshiai.cn/ingress-ports"
-	LabelExposeNodeIP      = "cloud.xiaoshiai.cn/expose-node-ip"
-)
-
-const NodeIPPlaceholder = "{NodeIP}"
+var errInvalidScalePodSelector = errors.New("invalid scale pod selector")
 
 func (r *InstanceReconciler) syncStatus(ctx context.Context, instance *appsv1.Instance) error {
 	resources := []*unstructured.Unstructured{}
@@ -71,24 +45,73 @@ func (r *InstanceReconciler) syncStatus(ctx context.Context, instance *appsv1.In
 		logr.FromContextOrDiscard(ctx).Error(expressionErr, "check annotations failed")
 	}
 
-	replicas := getGlobalReplicas(instance.Status.Values.Object)
-	instance.Status.Replicas = replicas
-	instance.Status.Selector = fmt.Sprintf("app.kubernetes.io/instance=%s", instance.Name)
+	if err := r.syncScaleStatus(ctx, instance); err != nil {
+		instance.Status.Replicas = 0
+		instance.Status.Selector = ""
+		reason := ReasonScaleObservationFailed
+		if errors.Is(err, errInvalidScalePodSelector) {
+			reason = ReasonInvalidScalePodSelector
+		}
+		r.setCondition(instance, appsv1.ConditionAutoscalingReady, metav1.ConditionFalse, reason, err.Error())
+	} else {
+		r.setCondition(instance, appsv1.ConditionAutoscalingReady, metav1.ConditionTrue, ReasonAutoscalingReady, "Scale target pods observed successfully")
+	}
 	if getGlobalPaused(instance.Status.Values.Object) {
 		instance.Status.Phase = appsv1.PhasePaused
 		instance.Status.Message = ""
-		r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, "Paused", "Instance is paused")
+		r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, ReasonPaused, "Instance is paused")
 	} else {
 		var ready bool
 		instance.Status.Phase, ready, instance.Status.Message = computeRuntimePhase(instance.Status.Resources, instance.Status.States)
 		if ready {
-			r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionTrue, "Ready", "Instance is ready")
+			r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionTrue, ReasonReady, "Instance is ready")
 		} else {
 			r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, string(instance.Status.Phase), instance.Status.Message)
 		}
 	}
 
 	return nil
+}
+
+func (r *InstanceReconciler) syncScaleStatus(ctx context.Context, instance *appsv1.Instance) error {
+	selector, err := resolveScalePodSelector(instance)
+	if err != nil {
+		return err
+	}
+	pods := &corev1.PodList{}
+	if err := r.Client.List(ctx, pods, client.InNamespace(instance.Namespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return fmt.Errorf("list scale target pods: %w", err)
+	}
+
+	var replicas int32
+	for i := range pods.Items {
+		switch pods.Items[i].Status.Phase {
+		case corev1.PodSucceeded, corev1.PodFailed:
+			continue
+		default:
+			replicas++
+		}
+	}
+	instance.Status.Replicas = replicas
+	instance.Status.Selector = selector.String()
+	return nil
+}
+
+func resolveScalePodSelector(instance *appsv1.Instance) (labels.Selector, error) {
+	selector := labels.Set{apps.LabelInstance: instance.Name}.AsSelector()
+	additional := strings.TrimSpace(instance.Annotations[apps.AnnotationScalePodSelector])
+	if additional == "" {
+		return selector, nil
+	}
+	parsed, err := labels.Parse(additional)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse %s annotation: %v", errInvalidScalePodSelector, apps.AnnotationScalePodSelector, err)
+	}
+	requirements, selectable := parsed.Requirements()
+	if !selectable {
+		return nil, fmt.Errorf("%w: parse %s annotation: selector is not selectable", errInvalidScalePodSelector, apps.AnnotationScalePodSelector)
+	}
+	return selector.Add(requirements...), nil
 }
 
 func computeRuntimePhase(resources []appsv1.ManagedResource, states []appsv1.State) (appsv1.Phase, bool, string) {
@@ -117,19 +140,19 @@ func computeJobPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 	hasUnknown := false
 	for _, s := range states {
 		switch s.Status {
-		case StateStatusFailed,
-			StateStatusError,
-			StateStatusCrashLoopBackOff,
-			StateStatusUnhealthy:
+		case apps.StateStatusFailed,
+			apps.StateStatusError,
+			apps.StateStatusCrashLoopBackOff,
+			apps.StateStatusUnhealthy:
 			hasFailed = true
-		case StateStatusSucceeded,
-			StateCompleted:
+		case apps.StateStatusSucceeded,
+			apps.StateStatusCompleted:
 			hasSucceeded = true
-		case StateStatusRunning,
-			StateStatusHealthy,
-			StateStatusActive:
+		case apps.StateStatusRunning,
+			apps.StateStatusHealthy,
+			apps.StateStatusActive:
 			hasRunning = true
-		case StateStatusPending:
+		case apps.StateStatusPending:
 			hasPending = true
 		default:
 			hasUnknown = true
@@ -161,24 +184,24 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 	hasDegraded := false
 	for _, s := range states {
 		switch s.Status {
-		case StateStatusFailed,
-			StateStatusError,
-			StateStatusCrashLoopBackOff,
-			StateStatusUnhealthy:
+		case apps.StateStatusFailed,
+			apps.StateStatusError,
+			apps.StateStatusCrashLoopBackOff,
+			apps.StateStatusUnhealthy:
 			hasUnhealthy = true
-		case StateStatusDegraded,
-			StateStatusUpdating,
-			StateStatusScaling,
-			StateStatusPending,
-			StateStatusPaused,
-			StateStatusUnknown:
+		case apps.StateStatusDegraded,
+			apps.StateStatusUpdating,
+			apps.StateStatusScaling,
+			apps.StateStatusPending,
+			apps.StateStatusPaused,
+			apps.StateStatusUnknown:
 			hasDegraded = true
-		case StateStatusRunning,
-			StateStatusHealthy,
-			StateStatusActive,
-			StateStatusScaledToZero,
-			StateStatusSucceeded,
-			StateCompleted:
+		case apps.StateStatusRunning,
+			apps.StateStatusHealthy,
+			apps.StateStatusActive,
+			apps.StateStatusScaledToZero,
+			apps.StateStatusSucceeded,
+			apps.StateStatusCompleted:
 			// Explicitly healthy.
 		default:
 			// Preserve custom status strings for display, but never infer Healthy
@@ -271,7 +294,7 @@ func getUnhealthyMessage(states []appsv1.State) string {
 
 func isStateHealthy(status string) bool {
 	switch status {
-	case StateStatusRunning, StateStatusHealthy, StateStatusActive, StateStatusScaledToZero, StateStatusSucceeded, StateCompleted:
+	case apps.StateStatusRunning, apps.StateStatusHealthy, apps.StateStatusActive, apps.StateStatusScaledToZero, apps.StateStatusSucceeded, apps.StateStatusCompleted:
 		return true
 	}
 	return false
@@ -311,20 +334,20 @@ func getJobState(resource *unstructured.Unstructured) appsv1.State {
 	state := appsv1.State{Name: job.Name, Kind: "Job"}
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobSuspended && c.Status == corev1.ConditionTrue {
-			state.Status = StateStatusPaused
+			state.Status = apps.StateStatusPaused
 			return state
 		}
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
-			state.Status = StateStatusSucceeded
+			state.Status = apps.StateStatusSucceeded
 			return state
 		}
 		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
-			state.Status = StateStatusFailed
+			state.Status = apps.StateStatusFailed
 			state.Message = c.Message
 			return state
 		}
 	}
-	state.Status = StateStatusRunning
+	state.Status = apps.StateStatusRunning
 	return state
 }
 
@@ -385,18 +408,18 @@ func replicasOrDefault(replicas *int32) int32 {
 
 func calcReplicasState(desired, current, ready int32) string {
 	if desired == 0 && current == 0 {
-		return StateStatusScaledToZero
+		return apps.StateStatusScaledToZero
 	}
 	if current != desired {
-		return StateStatusScaling
+		return apps.StateStatusScaling
 	}
 	if ready == desired {
-		return StateStatusRunning
+		return apps.StateStatusRunning
 	}
 	if ready == 0 {
-		return StateStatusUnhealthy
+		return apps.StateStatusUnhealthy
 	}
-	return StateStatusDegraded
+	return apps.StateStatusDegraded
 }
 
 func getDaemonSetState(resource *unstructured.Unstructured) appsv1.State {
@@ -419,14 +442,14 @@ func getPodState(resource *unstructured.Unstructured) appsv1.State {
 	state := appsv1.State{Name: pod.Name, Kind: "Pod"}
 	switch pod.Status.Phase {
 	case corev1.PodSucceeded:
-		state.Status = StateStatusSucceeded
+		state.Status = apps.StateStatusSucceeded
 	case corev1.PodFailed:
-		state.Status = StateStatusFailed
+		state.Status = apps.StateStatusFailed
 		state.Message = pod.Status.Message
 	case corev1.PodRunning:
-		state.Status = StateStatusRunning
+		state.Status = apps.StateStatusRunning
 	default:
-		state.Status = StateStatusPending
+		state.Status = apps.StateStatusPending
 	}
 	return state
 }
@@ -499,7 +522,7 @@ func getIngressEndpointsWithClient(ctx context.Context, cli client.Client, ingre
 		if err := client.IgnoreNotFound(cli.Get(ctx, client.ObjectKey{Name: *ingress.Spec.IngressClassName}, ingressClass)); err != nil {
 			logr.FromContextOrDiscard(ctx).Error(err, "get ingress class for endpoints", "name", *ingress.Spec.IngressClassName)
 		} else {
-			ports = parseIngressPorts(ingressClass.Annotations[AnnotationIngressPorts])
+			ports = parseIngressPorts(ingressClass.Annotations[apps.AnnotationIngressPorts])
 		}
 	}
 	tlsHosts := map[string]struct{}{}
@@ -693,7 +716,7 @@ func (r *InstanceReconciler) checkAnnotations(ctx context.Context, instance *app
 
 	var expressionErrors []error
 	var endpoints []appsv1.Endpoint
-	if endpointsexpression := annotations[appsv1.AnnotationEndpointsExpression]; endpointsexpression != "" {
+	if endpointsexpression := annotations[apps.AnnotationEndpointsExpression]; endpointsexpression != "" {
 		var err error
 		endpoints, err = checkEndpoints(endpointsexpression, celdata)
 		if err != nil {
@@ -703,7 +726,7 @@ func (r *InstanceReconciler) checkAnnotations(ctx context.Context, instance *app
 	} else {
 		endpoints = GetDefaultEndpoints(ctx, r.Client, resources)
 	}
-	if expression := annotations[appsv1.AnnotationAdditionalEndpointsExpression]; expression != "" {
+	if expression := annotations[apps.AnnotationAdditionalEndpointsExpression]; expression != "" {
 		additional, err := checkEndpoints(expression, celdata)
 		if err != nil {
 			expressionErrors = append(expressionErrors, fmt.Errorf("additional endpoints expression: %w", err))
@@ -716,7 +739,7 @@ func (r *InstanceReconciler) checkAnnotations(ctx context.Context, instance *app
 	// already sorted by GetDefaultEndpoints.
 	instance.Status.Endpoints = resolveNodeIPEndpoints(ctx, r.Client, dedupeEndpoints(endpoints))
 
-	if statusexpression := annotations[appsv1.AnnotationStatesExpression]; statusexpression != "" {
+	if statusexpression := annotations[apps.AnnotationStatesExpression]; statusexpression != "" {
 		states, err := checkStates(statusexpression, celdata)
 		if err != nil {
 			expressionErrors = append(expressionErrors, fmt.Errorf("states expression: %w", err))
@@ -728,7 +751,7 @@ func (r *InstanceReconciler) checkAnnotations(ctx context.Context, instance *app
 		instance.Status.States = GetDefaultStates(resources)
 	}
 
-	if summaryexpression := annotations[appsv1.AnnotationSummaryExpression]; summaryexpression != "" {
+	if summaryexpression := annotations[apps.AnnotationSummaryExpression]; summaryexpression != "" {
 		summary, err := checkSummary(summaryexpression, celdata)
 		if err != nil {
 			expressionErrors = append(expressionErrors, fmt.Errorf("summary expression: %w", err))
@@ -741,10 +764,10 @@ func (r *InstanceReconciler) checkAnnotations(ctx context.Context, instance *app
 	}
 
 	if err := errors.Join(expressionErrors...); err != nil {
-		r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionFalse, "ExpressionEvaluationFailed", err.Error())
+		r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionFalse, ReasonExpressionEvaluationFailed, err.Error())
 		return err
 	}
-	r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionTrue, "ExpressionsReady", "Configured expressions evaluated successfully")
+	r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionTrue, ReasonExpressionsReady, "Configured expressions evaluated successfully")
 	return nil
 }
 
@@ -894,7 +917,7 @@ func resolveNodeIPEndpoints(ctx context.Context, cli client.Client, endpoints []
 		return endpoints
 	}
 	nodes := &corev1.NodeList{}
-	if err := cli.List(ctx, nodes, client.MatchingLabels{LabelExposeNodeIP: "true"}); err != nil {
+	if err := cli.List(ctx, nodes, client.MatchingLabels{apps.LabelExposeNodeIP: "true"}); err != nil {
 		logr.FromContextOrDiscard(ctx).Error(err, "list nodes to resolve endpoint URLs")
 		return endpoints
 	}

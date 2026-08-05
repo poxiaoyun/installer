@@ -115,12 +115,6 @@ type ManagedResource = appsv1.ManagedResource
 
 type InstanceKind = appsv1.InstanceKind
 
-const (
-	InstanceKindHelm      InstanceKind = "helm"
-	InstanceKindKustomize InstanceKind = "kustomize"
-	InstanceKindTemplate  InstanceKind = "template"
-)
-
 type Installer interface {
 	Apply(ctx context.Context, bundle Instance) (*InstanceStatus, error)
 	Remove(ctx context.Context, bundle Instance) error

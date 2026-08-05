@@ -172,12 +172,13 @@ type InstanceStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Replicas is the instance-level replica count from the last successful sync.
-	// It is exposed through the scale subresource.
+	// Replicas is the number of current non-terminal Pods matching Selector.
+	// It is exposed as the observed replica count through the scale subresource.
 	Replicas int32 `json:"replicas,omitempty"`
 
-	// Selector identifies the Pods managed by this Instance and is exposed
-	// through the scale subresource.
+	// Selector identifies the Pods represented by Replicas. It combines the
+	// instance identity label with any configured scale Pod selector and is
+	// exposed through the scale subresource.
 	Selector string `json:"selector,omitempty"`
 
 	// Phase is the current state of the release
@@ -348,4 +349,6 @@ const (
 	ConditionReady = "Ready"
 	// ConditionExpressionsReady indicates whether configured status expressions evaluated successfully.
 	ConditionExpressionsReady = "ExpressionsReady"
+	// ConditionAutoscalingReady indicates whether the scale status can be observed safely.
+	ConditionAutoscalingReady = "AutoscalingReady"
 )

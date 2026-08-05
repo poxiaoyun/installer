@@ -39,14 +39,6 @@ import (
 	"xiaoshiai.cn/installer/utils"
 )
 
-const (
-	FinalizerName = apps.GroupName + "/finalizer"
-
-	// AnnotationAllowClusterScoped is a namespace annotation that, when set to "true",
-	// allows instances in that namespace to create cluster-scoped resources.
-	AnnotationAllowClusterScoped = apps.GroupName + "/allow-cluster-scoped"
-)
-
 func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	cfg, cli := mgr.GetConfig(), mgr.GetClient()
 	allowNS := make(map[string]struct{}, len(options.AllowClusterScopedNamespaces))
@@ -54,8 +46,9 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 		allowNS[ns] = struct{}{}
 	}
 
+	runtimeResourceEventMapper := DynamicWatchEventHandler{Client: cli}
 	dynamicSources := NewDynamicSources(mgr.GetCache(),
-		DynamicWatchEventHandler{Client: cli}.Handler(),
+		runtimeResourceEventMapper.Handler(),
 		predicate.ResourceVersionChangedPredicate{})
 
 	r := &InstanceReconciler{
@@ -74,6 +67,9 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &corev1.Secret{}, ValueFromEventHandler[*corev1.Secret](cli, "Secret")),
 		).
+		WatchesRawSource(
+			source.TypedKind(mgr.GetCache(), &corev1.Pod{}, typedDynamicWatchEventHandler[*corev1.Pod](runtimeResourceEventMapper)),
+		).
 		WatchesRawSource(dynamicSources).
 		Complete(r)
 }
@@ -84,29 +80,39 @@ type DynamicWatchEventHandler struct {
 
 func (d DynamicWatchEventHandler) Handler() handler.TypedEventHandler[client.Object, reconcile.Request] {
 	return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		if obj.GetNamespace() == "" {
-			return nil
-		}
-		labels := obj.GetLabels()
-		if labels == nil {
-			return nil
-		}
-		instanceName, ok := labels["app.kubernetes.io/instance"]
-		if !ok {
-			return nil
-		}
-		key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: instanceName}
-		instance := &appsv1.Instance{}
-		if err := d.Client.Get(ctx, key, instance); err != nil {
-			logr.FromContextOrDiscard(ctx).Error(err, "get instance for dynamic watch event", "instance", key)
-			return nil
-		}
-		if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) {
-			logr.FromContextOrDiscard(ctx).Info("skip dynamic watch event for instance not in installed phase", "instance", key)
-			return nil
-		}
-		return []reconcile.Request{{NamespacedName: key}}
+		return d.requestsFor(ctx, obj)
 	})
+}
+
+func typedDynamicWatchEventHandler[T client.Object](d DynamicWatchEventHandler) handler.TypedEventHandler[T, reconcile.Request] {
+	return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj T) []reconcile.Request {
+		return d.requestsFor(ctx, obj)
+	})
+}
+
+func (d DynamicWatchEventHandler) requestsFor(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj.GetNamespace() == "" {
+		return nil
+	}
+	labels := obj.GetLabels()
+	if labels == nil {
+		return nil
+	}
+	instanceName, ok := labels[apps.LabelInstance]
+	if !ok {
+		return nil
+	}
+	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: instanceName}
+	instance := &appsv1.Instance{}
+	if err := d.Client.Get(ctx, key, instance); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "get instance for dynamic watch event", "instance", key)
+		return nil
+	}
+	if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) {
+		logr.FromContextOrDiscard(ctx).Info("skip dynamic watch event for instance not in installed phase", "instance", key)
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: key}}
 }
 
 // ValueFromEventHandler returns an event handler that enqueues reconcile requests
@@ -176,13 +182,13 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if err := r.Remove(ctx, instance); err != nil {
 			instance.Status.Phase = appsv1.PhaseFailed
 			instance.Status.Message = err.Error()
-			r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "UninstallFailed", err.Error())
+			r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, ReasonUninstallFailed, err.Error())
 			_ = r.Client.Status().Update(ctx, instance)
 			return ctrl.Result{}, err
 		}
 
 		// Remove finalizer after successful removal
-		if controllerutil.RemoveFinalizer(instance, FinalizerName) {
+		if controllerutil.RemoveFinalizer(instance, apps.FinalizerName) {
 			log.Info("remove finalizer")
 			if err := r.Client.Update(ctx, instance); err != nil {
 				return ctrl.Result{}, err
@@ -190,7 +196,7 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		return ctrl.Result{}, nil
 	}
-	if instance.DeletionTimestamp == nil && controllerutil.AddFinalizer(instance, FinalizerName) {
+	if instance.DeletionTimestamp == nil && controllerutil.AddFinalizer(instance, apps.FinalizerName) {
 		log.Info("add finalizer")
 		if err := r.Client.Update(ctx, instance); err != nil {
 			return ctrl.Result{}, err
@@ -243,28 +249,28 @@ func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance
 
 func (r *InstanceReconciler) syncDeps(ctx context.Context, instance *appsv1.Instance) error {
 	if err := r.checkDepenency(ctx, instance); err != nil {
-		r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionFalse, "DependencyNotReady", err.Error())
+		r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionFalse, ReasonDependencyNotReady, err.Error())
 		return err
 	}
-	r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionTrue, "AllDependenciesReady", "All dependencies are installed")
+	r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionTrue, ReasonAllDependenciesReady, "All dependencies are installed")
 	return nil
 }
 
 func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.Instance) error {
 	log := logr.FromContextOrDiscard(ctx)
 	if err := validateInstanceSource(instance); err != nil {
-		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "InvalidSource", err.Error())
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, ReasonInvalidSource, err.Error())
 		return err
 	}
 
 	values, err := r.resolveValues(ctx, instance)
 	if err != nil {
-		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "ResolveValuesFailed", err.Error())
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, ReasonResolveValuesFailed, err.Error())
 		return err
 	}
 	auth, err := r.resolveAuth(ctx, instance)
 	if err != nil {
-		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, "ResolveAuthFailed", err.Error())
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, ReasonResolveAuthFailed, err.Error())
 		return err
 	}
 	instanceSpec := installerInstanceFrom(instance, values, auth)
@@ -274,7 +280,7 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 
 	if executionUpToDate(instance, values) {
 		log.Info("already uptodate")
-		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, ReasonInstalled, "Instance is installed and ready")
 		return nil
 	}
 
@@ -284,7 +290,7 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 		log.Error(err, "apply instance")
 		reason := string(apierrors.ReasonForError(err))
 		if reason == string(metav1.StatusReasonUnknown) {
-			reason = "ApplyFailed"
+			reason = ReasonApplyFailed
 		}
 		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, reason, err.Error())
 		return err
@@ -305,7 +311,7 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 	instance.Status.Resources = result.Resources
 	instance.Status.Extensions = instance.Spec.Extensions
 
-	r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, "Installed", "Instance is installed and ready")
+	r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionTrue, ReasonInstalled, "Instance is installed and ready")
 	return nil
 }
 
@@ -514,7 +520,7 @@ func getGlobalStringMap(values map[string]any, key string) map[string]string {
 // isClusterScopedAllowed checks whether instances in the given namespace are permitted
 // to create cluster-scoped resources. It returns true if either:
 //   - the namespace is in the static AllowClusterScopedNamespaces set, or
-//   - the Namespace object has the annotation "installer.xiaoshiai.cn/allow-cluster-scoped=true".
+//   - the Namespace object has the annotation "apps.xiaoshiai.cn/allow-cluster-scoped=true".
 func (r *InstanceReconciler) isClusterScopedAllowed(ctx context.Context, namespace string) bool {
 	if _, ok := r.AllowClusterScopedNamespaces[namespace]; ok {
 		return true
@@ -523,7 +529,7 @@ func (r *InstanceReconciler) isClusterScopedAllowed(ctx context.Context, namespa
 	if err := r.Client.Get(ctx, client.ObjectKey{Name: namespace}, ns); err != nil {
 		return false
 	}
-	return ns.Annotations[AnnotationAllowClusterScoped] == "true"
+	return ns.Annotations[apps.AnnotationAllowClusterScoped] == "true"
 }
 
 // https://github.com/golang/go/issues/19502

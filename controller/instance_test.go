@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/controller"
 )
@@ -39,7 +40,7 @@ var _ = Describe("Basic Plugin tests", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(plugin.Status.Phase).To(Equal(appsv1.PhaseInstalled))
-		Expect(plugin.Finalizers).To(Equal([]string{controller.FinalizerName}))
+		Expect(plugin.Finalizers).To(Equal([]string{apps.FinalizerName}))
 		Expect(plugin.Status.Version).To(Equal("0.0.21"))
 	})
 
@@ -149,19 +150,38 @@ var _ = Describe("Instance scale subresource", func() {
 		scale := &autoscalingv1.Scale{}
 		Expect(k8sClient.SubResource("scale").Get(ctx, instance, scale)).To(Succeed())
 		Expect(scale.Spec.Replicas).To(Equal(int32(1)))
-		Expect(scale.Status.Replicas).To(Equal(int32(1)))
+		Expect(scale.Status.Replicas).To(Equal(int32(0)))
 		Expect(scale.Status.Selector).To(Equal("app.kubernetes.io/instance=scale-test"))
 		configMap := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "scale-test-cm"}, configMap)).To(Succeed())
 		Expect(configMap.Data).To(HaveKeyWithValue("global-replicas", "1"))
 		Expect(configMap.Data).To(HaveKeyWithValue("global-paused", "false"))
+		firstPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "scale-test-worker-1",
+				Namespace: "default",
+				Labels:    map[string]string{apps.LabelInstance: "scale-test"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "example.invalid/worker"}}},
+		}
+		Expect(k8sClient.Create(ctx, firstPod)).To(Succeed())
+		Eventually(func() int32 {
+			_ = k8sClient.SubResource("scale").Get(ctx, instance, scale)
+			return scale.Status.Replicas
+		}, 30*time.Second, 500*time.Millisecond).Should(Equal(int32(1)))
 
 		scale.Spec.Replicas = 0
 		Expect(k8sClient.SubResource("scale").Update(ctx, instance, client.WithSubResourceBody(scale))).To(Succeed())
+		Eventually(func() string {
+			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap)
+			return configMap.Data["global-replicas"]
+		}, 30*time.Second, 500*time.Millisecond).Should(Equal("0"))
+		Expect(k8sClient.Delete(ctx, firstPod)).To(Succeed())
 		Eventually(func() int32 {
-			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)
-			return instance.Status.Replicas
+			_ = k8sClient.SubResource("scale").Get(ctx, instance, scale)
+			return scale.Status.Replicas
 		}, 30*time.Second, 500*time.Millisecond).Should(Equal(int32(0)))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
 		Expect(instance.Status.Phase).To(Equal(appsv1.PhaseInstalled))
 		Expect(instance.Status.Replicas).To(Equal(int32(0)))
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap)).To(Succeed())
@@ -171,15 +191,30 @@ var _ = Describe("Instance scale subresource", func() {
 		Expect(k8sClient.SubResource("scale").Get(ctx, instance, scale)).To(Succeed())
 		scale.Spec.Replicas = 2
 		Expect(k8sClient.SubResource("scale").Update(ctx, instance, client.WithSubResourceBody(scale))).To(Succeed())
+		Eventually(func() string {
+			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap)
+			return configMap.Data["global-replicas"]
+		}, 30*time.Second, 500*time.Millisecond).Should(Equal("2"))
+		secondPod := firstPod.DeepCopy()
+		secondPod.ResourceVersion = ""
+		secondPod.Name = "scale-test-worker-2"
+		thirdPod := firstPod.DeepCopy()
+		thirdPod.ResourceVersion = ""
+		thirdPod.Name = "scale-test-worker-3"
+		Expect(k8sClient.Create(ctx, secondPod)).To(Succeed())
+		Expect(k8sClient.Create(ctx, thirdPod)).To(Succeed())
 		Eventually(func() int32 {
-			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)
-			return instance.Status.Replicas
+			_ = k8sClient.SubResource("scale").Get(ctx, instance, scale)
+			return scale.Status.Replicas
 		}, 30*time.Second, 500*time.Millisecond).Should(Equal(int32(2)))
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
 		Expect(instance.Status.Replicas).To(Equal(int32(2)))
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(configMap), configMap)).To(Succeed())
 		Expect(configMap.Data).To(HaveKeyWithValue("global-replicas", "2"))
 		Expect(configMap.Data).To(HaveKeyWithValue("global-paused", "false"))
 
+		Expect(k8sClient.Delete(ctx, secondPod)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, thirdPod)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
 		Expect(waitAllRemoved(ctx)).To(Succeed())
 	})
@@ -234,7 +269,7 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 		readyCondition := meta.FindStatusCondition(plugin.Status.Conditions, appsv1.ConditionReady)
 		Expect(readyCondition).NotTo(BeNil())
 		Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
-		Expect(readyCondition.Reason).To(Equal("Ready"))
+		Expect(readyCondition.Reason).To(Equal(controller.ReasonReady))
 
 		// Verify DependenciesReady condition
 		depsCondition := meta.FindStatusCondition(plugin.Status.Conditions, appsv1.ConditionDependenciesReady)
