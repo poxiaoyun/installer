@@ -178,12 +178,14 @@ spec:
                   x-kubernetes-map-type: atomic
                 type: array
               extensions:
-                description: Extensions is a list of extensions to extend the sync/remove
-                  logic.
+                description: |-
+                  Extensions is an ordered list of manifest extensions. Each extension
+                  receives the objects returned by the previous extension.
                 items:
                   properties:
                     kind:
-                      description: Kind is the kind of the extension.
+                      description: Kind is the kind of the extension, such as CommonMetadata
+                        or RawManifest.
                       minLength: 1
                       type: string
                     name:
@@ -192,7 +194,9 @@ spec:
                     params:
                       additionalProperties:
                         type: string
-                      description: Params is the params of the extension.
+                      description: |-
+                        Params contains kind-specific extension parameters. RawManifest uses the
+                        manifest parameter as a multi-document Kubernetes YAML or JSON stream.
                       type: object
                   required:
                   - kind
@@ -401,7 +405,8 @@ spec:
                 items:
                   properties:
                     kind:
-                      description: Kind is the kind of the extension.
+                      description: Kind is the kind of the extension, such as CommonMetadata
+                        or RawManifest.
                       minLength: 1
                       type: string
                     name:
@@ -410,7 +415,9 @@ spec:
                     params:
                       additionalProperties:
                         type: string
-                      description: Params is the params of the extension.
+                      description: |-
+                        Params contains kind-specific extension parameters. RawManifest uses the
+                        manifest parameter as a multi-document Kubernetes YAML or JSON stream.
                       type: object
                   required:
                   - kind

@@ -1,6 +1,7 @@
 package native
 
 import (
+	"bytes"
 	"context"
 	"time"
 
@@ -25,7 +26,18 @@ func New(cli client.Client, fun TemplateFun) *Apply {
 }
 
 func (p *Apply) Template(ctx context.Context, instance install.Instance) ([]byte, error) {
-	return p.TemplateFun(ctx, instance)
+	rendered, err := p.TemplateFun(ctx, instance)
+	if err != nil {
+		return nil, err
+	}
+	if instance.PostRenderer == nil {
+		return rendered, nil
+	}
+	result, err := instance.PostRenderer.Run(bytes.NewBuffer(rendered), nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.Bytes(), nil
 }
 
 func (p *Apply) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {

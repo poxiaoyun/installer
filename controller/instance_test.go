@@ -6,9 +6,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	k8sappsv1 "k8s.io/api/apps/v1"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -130,6 +132,74 @@ var _ = Describe("Basic Plugin tests", func() {
 		}
 		err = waitAllRemoved(ctx)
 		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+var _ = Describe("RawManifest extension", func() {
+	It("adds ordered manifests and removes them with the extension", func() {
+		instance := &appsv1.Instance{
+			ObjectMeta: metav1.ObjectMeta{Name: "raw-manifest-test", Namespace: "default"},
+			Spec: appsv1.InstanceSpec{
+				Kind:    appsv1.InstanceKindHelm,
+				Path:    "testdata/helm-test",
+				URL:     "file://" + testhelmdir,
+				Version: "v0.0.0",
+				Values: appsv1.Values{Object: map[string]any{
+					"global": map[string]any{"paused": true},
+				}},
+				Extensions: []appsv1.Extension{{
+					Name: "workload",
+					Kind: apps.ExtensionKindRawManifest,
+					Params: map[string]string{apps.ExtensionParamManifest: `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: raw-manifest-workload
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: raw-manifest-workload
+  template:
+    metadata:
+      labels:
+        app: raw-manifest-workload
+    spec:
+      containers:
+        - name: workload
+          image: example.invalid/workload
+`},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+		Expect(waitForPhase(ctx, instance, appsv1.PhasePaused)).To(Succeed())
+
+		deployment := &k8sappsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "raw-manifest-workload"}, deployment)).To(Succeed())
+		Expect(deployment.Spec.Replicas).NotTo(BeNil())
+		Expect(*deployment.Spec.Replicas).To(Equal(int32(0)))
+		Expect(deployment.Labels).To(HaveKeyWithValue(apps.LabelInstance, instance.Name))
+		Expect(deployment.Spec.Template.Labels).To(HaveKeyWithValue(apps.LabelInstance, instance.Name))
+
+		instance.Spec.Extensions = nil
+		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+		Eventually(func() bool {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
+				return false
+			}
+			return instance.Status.ObservedGeneration == instance.Generation && len(instance.Status.Extensions) == 0
+		}, 30*time.Second, 500*time.Millisecond).Should(BeTrue())
+		Eventually(func() bool {
+			err := k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "raw-manifest-workload"}, deployment)
+			return apierrors.IsNotFound(err)
+		}, 30*time.Second, 500*time.Millisecond).Should(BeTrue())
+
+		Expect(k8sClient.Delete(ctx, instance)).To(Succeed())
+		Eventually(func() bool {
+			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)
+			return apierrors.IsNotFound(err)
+		}, 30*time.Second, 500*time.Millisecond).Should(BeTrue())
 	})
 })
 

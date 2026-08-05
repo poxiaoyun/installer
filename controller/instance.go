@@ -389,10 +389,23 @@ func validateInstanceSource(instance *appsv1.Instance) error {
 }
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
-// The pipeline order is: Dashboard generation → Namespace → instance identity →
-// Extensions (CommonMetadata, ...) → Paused.
+// The pipeline order is: Dashboard generation → ordered extensions → Namespace →
+// instance identity → Paused.
 func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
 	var modifiers []postrender.ObjectModifier
+
+	// Extensions execute strictly in their declared order. Platform invariants run
+	// afterwards so objects added by an extension receive the same enforcement.
+	modifiers = append(modifiers, &postrender.ExtensionRenderer{
+		Extensions: instance.Spec.Extensions,
+		Handlers: map[string]postrender.ExtensionHandler{
+			apps.ExtensionKindCommonMetadata: &postrender.CommonMetadataHandler{
+				CommonLabels:      getGlobalCommonLabels(values),
+				CommonAnnotations: getGlobalCommonAnnotations(values),
+			},
+			apps.ExtensionKindRawManifest: &postrender.RawManifestHandler{},
+		},
+	})
 
 	// Namespace enforcement — validate scope and force namespace
 	allowClusterScoped := r.isClusterScopedAllowed(ctx, instance.Namespace)
@@ -406,17 +419,6 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 	// Instance identity is a platform invariant used by dynamic resource watches.
 	modifiers = append(modifiers, &postrender.InstanceIdentityRenderer{
 		InstanceName: instance.Name,
-	})
-
-	// Extension processing — dispatches to registered handlers by Kind.
-	modifiers = append(modifiers, &postrender.ExtensionRenderer{
-		Extensions: instance.Spec.Extensions,
-		Handlers: map[string]postrender.ExtensionHandler{
-			"CommonMetadata": &postrender.CommonMetadataHandler{
-				CommonLabels:      getGlobalCommonLabels(values),
-				CommonAnnotations: getGlobalCommonAnnotations(values),
-			},
-		},
 	})
 
 	// Paused remains an independent control from the desired replica count.

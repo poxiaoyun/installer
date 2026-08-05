@@ -1,6 +1,7 @@
 package helm
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,7 +33,22 @@ func New(config *rest.Config) *Apply {
 }
 
 func (r *Apply) Template(ctx context.Context, instance install.Instance) ([]byte, error) {
-	return TemplateChart(ctx, instance.Name, instance.Namespace, instance.Location, nil)
+	rendered, err := TemplateChart(ctx, instance.Name, instance.Namespace, instance.Location, instance.Values)
+	if err != nil {
+		return nil, err
+	}
+	if instance.PostRenderer == nil {
+		return rendered, nil
+	}
+	loadedChart, err := loader.Load(instance.Location)
+	if err != nil {
+		return nil, fmt.Errorf("load chart for post-rendering: %w", err)
+	}
+	result, err := instance.PostRenderer.Run(bytes.NewBuffer(rendered), loadedChart)
+	if err != nil {
+		return nil, err
+	}
+	return result.Bytes(), nil
 }
 
 func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {

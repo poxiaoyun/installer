@@ -86,7 +86,8 @@ type InstanceSpec struct {
 	// +kubebuilder:validation:Optional
 	Options []Option `json:"options,omitempty"`
 
-	// Extensions is a list of extensions to extend the sync/remove logic.
+	// Extensions is an ordered list of manifest extensions. Each extension
+	// receives the objects returned by the previous extension.
 	// +kubebuilder:validation:Optional
 	Extensions []Extension `json:"extensions,omitempty"`
 
@@ -145,11 +146,12 @@ type Option struct {
 type Extension struct {
 	// Name is the name of the extension.
 	Name string `json:"name"`
-	// Kind is the kind of the extension.
+	// Kind is the kind of the extension, such as CommonMetadata or RawManifest.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
-	// Params is the params of the extension.
+	// Params contains kind-specific extension parameters. RawManifest uses the
+	// manifest parameter as a multi-document Kubernetes YAML or JSON stream.
 	// +kubebuilder:validation:Optional
 	Params map[string]string `json:"params,omitempty"`
 }

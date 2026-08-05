@@ -18,11 +18,11 @@ type CommonMetadataHandler struct {
 }
 
 func (h *CommonMetadataHandler) Handle(objects []*unstructured.Unstructured, ext appsv1.Extension) ([]*unstructured.Unstructured, error) {
-	injectPodTemplates, err := extensionBoolParam(ext.Params, "podTemplates", true)
+	injectPodTemplates, err := extensionBoolParam(ext.Params, apps.ExtensionParamPodTemplates, true)
 	if err != nil {
 		return nil, err
 	}
-	injectVolumeClaimTemplates, err := extensionBoolParam(ext.Params, "volumeClaimTemplates", true)
+	injectVolumeClaimTemplates, err := extensionBoolParam(ext.Params, apps.ExtensionParamVolumeClaimTemplates, true)
 	if err != nil {
 		return nil, err
 	}

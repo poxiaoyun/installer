@@ -26,6 +26,15 @@ const (
 )
 
 const (
+	ExtensionKindCommonMetadata = "CommonMetadata"
+	ExtensionKindRawManifest    = "RawManifest"
+
+	ExtensionParamManifest             = "manifest"
+	ExtensionParamPodTemplates         = "podTemplates"
+	ExtensionParamVolumeClaimTemplates = "volumeClaimTemplates"
+)
+
+const (
 	ChartSecretType         = "apps.xiaoshiai.cn/helm-chart.v1"
 	ContentDigestAnnotation = "apps.xiaoshiai.cn/content-digest"
 	ChartSecretKey          = "chart.tgz"

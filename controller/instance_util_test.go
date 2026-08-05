@@ -111,7 +111,7 @@ func TestSyncInstallAppliesOncePerDesiredState(t *testing.T) {
 
 	// Extensions affect post-rendering even when chart version and values stay the same.
 	instance.Generation++
-	instance.Spec.Extensions = []appsv1.Extension{{Name: "common-metadata", Kind: "CommonMetadata"}}
+	instance.Spec.Extensions = []appsv1.Extension{{Name: "common-metadata", Kind: apps.ExtensionKindCommonMetadata}}
 	if err := reconciler.syncInstall(context.Background(), instance); err != nil {
 		t.Fatalf("extension change syncInstall() error = %v", err)
 	}
@@ -137,13 +137,13 @@ func TestExecutionUpToDate(t *testing.T) {
 				URL:        "oci://example.test/chart",
 				Version:    "repository-tag",
 				Values:     appsv1.Values{Object: map[string]any{"replicas": int64(1)}},
-				Extensions: []appsv1.Extension{{Name: "common-metadata", Kind: "CommonMetadata"}},
+				Extensions: []appsv1.Extension{{Name: "common-metadata", Kind: apps.ExtensionKindCommonMetadata}},
 			},
 			Status: appsv1.InstanceStatus{
 				ObservedGeneration: 2,
 				Version:            "1.0.0",
 				Values:             appsv1.Values{Object: map[string]any{"replicas": int64(1)}},
-				Extensions:         []appsv1.Extension{{Name: "common-metadata", Kind: "CommonMetadata"}},
+				Extensions:         []appsv1.Extension{{Name: "common-metadata", Kind: apps.ExtensionKindCommonMetadata}},
 				Conditions: []metav1.Condition{{
 					Type:   appsv1.ConditionInstalled,
 					Status: metav1.ConditionTrue,

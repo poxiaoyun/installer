@@ -235,7 +235,7 @@ spec:
 		CommonAnnotations: map[string]string{"owner": "apps"},
 	}
 
-	objects, err := handler.Handle(newObjects(), appsv1.Extension{Kind: "CommonMetadata"})
+	objects, err := handler.Handle(newObjects(), appsv1.Extension{Kind: apps.ExtensionKindCommonMetadata})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,8 +247,8 @@ spec:
 	vctLabels := nestedStringMap(t, objects[0].Object, "spec", "volumeClaimTemplates", "0", "metadata", "labels")
 	assertStringMapValue(t, vctLabels, "team", "platform", "default volume claim labels")
 
-	objects, err = handler.Handle(newObjects(), appsv1.Extension{Kind: "CommonMetadata", Params: map[string]string{
-		"volumeClaimTemplates": "false",
+	objects, err = handler.Handle(newObjects(), appsv1.Extension{Kind: apps.ExtensionKindCommonMetadata, Params: map[string]string{
+		apps.ExtensionParamVolumeClaimTemplates: "false",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -259,8 +259,8 @@ spec:
 		t.Fatalf("volume claim labels injected after opt-out: %#v", labels)
 	}
 
-	if _, err := handler.Handle(newObjects(), appsv1.Extension{Kind: "CommonMetadata", Params: map[string]string{
-		"podTemplates": "sometimes",
+	if _, err := handler.Handle(newObjects(), appsv1.Extension{Kind: apps.ExtensionKindCommonMetadata, Params: map[string]string{
+		apps.ExtensionParamPodTemplates: "sometimes",
 	}}); err == nil {
 		t.Fatal("invalid boolean parameter was accepted")
 	}
