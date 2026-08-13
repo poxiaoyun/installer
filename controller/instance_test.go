@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -13,11 +14,15 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/controller"
+	"xiaoshiai.cn/installer/install"
 )
 
 var _ = Describe("Basic Plugin tests", func() {
@@ -479,6 +484,117 @@ var _ = Describe("Phase status tests", func() {
 		Expect(appsv1.ConditionDependenciesReady).To(Equal("DependenciesReady"))
 	})
 })
+
+type pauseDuringResumeInstaller struct {
+	client        client.Client
+	appliedPaused bool
+	firstApply    bool
+}
+
+func (i *pauseDuringResumeInstaller) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {
+	global := instance.Values["global"].(map[string]any)
+	i.appliedPaused, _ = global["paused"].(bool)
+	if !i.firstApply {
+		i.firstApply = true
+		latest := &appsv1.Instance{}
+		key := client.ObjectKey{Namespace: instance.Namespace, Name: instance.Name}
+		if err := i.client.Get(ctx, key, latest); err != nil {
+			return nil, err
+		}
+		// The fake client does not advance generation, so simulate the API
+		// server behavior for the immediate pause spec update.
+		latest.Generation++
+		latest.Spec.Values = appsv1.Values{Object: map[string]any{
+			"global": map[string]any{"paused": true},
+		}}
+		if err := i.client.Update(ctx, latest); err != nil {
+			return nil, err
+		}
+	}
+	return &install.InstanceStatus{Values: instance.Values}, nil
+}
+
+func (i *pauseDuringResumeInstaller) Remove(context.Context, install.Instance) error { return nil }
+
+func (i *pauseDuringResumeInstaller) Template(context.Context, install.Instance) ([]byte, error) {
+	return nil, nil
+}
+
+func TestImmediatePauseConvergesAfterResumeStatusConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add installer scheme: %v", err)
+	}
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "pause-during-resume",
+			Namespace:  "default",
+			Generation: 2,
+			Finalizers: []string{apps.FinalizerName},
+		},
+		Spec: appsv1.InstanceSpec{
+			Kind: appsv1.InstanceKindHelm,
+			URL:  "oci://example.test/pause-during-resume",
+			Values: appsv1.Values{Object: map[string]any{
+				"global": map[string]any{"paused": false},
+			}},
+		},
+		Status: appsv1.InstanceStatus{
+			ObservedGeneration: 1,
+			Values: appsv1.Values{Object: map[string]any{
+				"global": map[string]any{"paused": true, "replicas": float64(1)},
+			}},
+			Conditions: []metav1.Condition{{
+				Type:   appsv1.ConditionInstalled,
+				Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.Instance{}).
+		WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			instance,
+		).
+		Build()
+	installer := &pauseDuringResumeInstaller{client: cli}
+	reconciler := &controller.InstanceReconciler{
+		Client:                       cli,
+		Scheme:                       scheme,
+		Applier:                      installer,
+		AllowClusterScopedNamespaces: map[string]struct{}{},
+	}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
+
+	if _, err := reconciler.Reconcile(t.Context(), request); !apierrors.IsConflict(err) {
+		t.Fatalf("resume Reconcile() error = %v, want status conflict", err)
+	}
+	if installer.appliedPaused {
+		t.Fatal("resume operation did not apply paused=false before the conflict")
+	}
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("pause Reconcile() error = %v", err)
+	}
+	if !installer.appliedPaused {
+		t.Fatal("backend remained resumed after the pause reconciliation")
+	}
+
+	current := &appsv1.Instance{}
+	if err := cli.Get(t.Context(), request.NamespacedName, current); err != nil {
+		t.Fatalf("get reconciled instance: %v", err)
+	}
+	if current.Status.ObservedGeneration != current.Generation {
+		t.Fatalf("observed generation = %d, want %d", current.Status.ObservedGeneration, current.Generation)
+	}
+	global := current.Status.Values.Object["global"].(map[string]any)
+	if paused, _ := global["paused"].(bool); !paused {
+		t.Fatalf("status paused = %v, want true", global["paused"])
+	}
+}
 
 func waitPhaseSet(ctx context.Context, bundle *appsv1.Instance) error {
 	return wait.PollUntilContextCancel(ctx, time.Second, false, func(ctx context.Context) (done bool, err error) {
