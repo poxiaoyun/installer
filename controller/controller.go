@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	"go.uber.org/zap/zapcore"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -35,7 +36,8 @@ type Options struct {
 
 	CacheDir string `json:"cacheDir,omitempty" description:"The directory to cache downloaded bundle charts."`
 
-	Concurrency int `json:"concurrency,omitempty" description:"The number of concurrent reconciles for each controller."`
+	Concurrency           int           `json:"concurrency,omitempty" description:"The number of concurrent reconciles for each controller."`
+	ReconciliationTimeout time.Duration `json:"reconciliationTimeout,omitempty" description:"The maximum duration of one reconciliation."`
 
 	// AllowClusterScopedNamespaces is a list of namespaces whose instances are always allowed
 	// to create cluster-scoped resources. Namespaces not in this list can still be allowed
@@ -46,12 +48,13 @@ type Options struct {
 func NewDefaultOptions() *Options {
 	home, _ := os.UserHomeDir()
 	return &Options{
-		MetricsAddr:      ":9090",
-		ProbeAddr:        ":8081",
-		LeaderElection:   false,
-		LeaderElectionID: "installer-leader-election",
-		CacheDir:         filepath.Join(home, ".cache", "installer"),
-		Concurrency:      5,
+		MetricsAddr:           ":9090",
+		ProbeAddr:             ":8081",
+		LeaderElection:        false,
+		LeaderElectionID:      "installer-leader-election",
+		CacheDir:              filepath.Join(home, ".cache", "installer"),
+		Concurrency:           5,
+		ReconciliationTimeout: 15 * time.Minute,
 		AllowClusterScopedNamespaces: []string{
 			"rune-system",
 			"kube-system",

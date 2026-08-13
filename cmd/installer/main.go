@@ -36,6 +36,7 @@ func NewInstallerCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&options.LeaderElection, "leader-election", "", options.LeaderElection, "enable leader election")
 	cmd.Flags().StringVarP(&options.LeaderElectionID, "leader-election-id", "", options.LeaderElectionID, "leader election id")
 	cmd.Flags().StringVarP(&options.CacheDir, "cache-dir", "", options.CacheDir, "cache directory for downloaded bundle charts")
+	cmd.Flags().DurationVar(&options.ReconciliationTimeout, "reconciliation-timeout", options.ReconciliationTimeout, "maximum duration of one reconciliation")
 	cmd.Flags().StringSliceVar(&options.AllowClusterScopedNamespaces, "allow-cluster-scoped-namespaces", options.AllowClusterScopedNamespaces, "namespaces whose instances are allowed to create cluster-scoped resources")
 	return cmd
 }

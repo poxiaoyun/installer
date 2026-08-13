@@ -1,11 +1,30 @@
 package helm
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/release"
+	"k8s.io/client-go/rest"
 )
+
+func TestNewHelmConfigLimitsRequestsToContextDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	helmConfig, err := NewHelmConfig(ctx, "default", &rest.Config{Host: "https://example.invalid"})
+	if err != nil {
+		t.Fatalf("NewHelmConfig() error = %v", err)
+	}
+	config, err := helmConfig.RESTClientGetter.ToRESTConfig()
+	if err != nil {
+		t.Fatalf("ToRESTConfig() error = %v", err)
+	}
+	if config.Timeout <= 0 || config.Timeout > time.Minute {
+		t.Fatalf("REST timeout = %s, want a positive duration no greater than the context deadline", config.Timeout)
+	}
+}
 
 func TestDesiredReleaseState(t *testing.T) {
 	base := func() *chart.Chart {

@@ -2,17 +2,123 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/install"
 )
+
+type blockingInstaller struct {
+	started chan struct{}
+	removed chan struct{}
+}
+
+func (i *blockingInstaller) Apply(ctx context.Context, _ install.Instance) (*install.InstanceStatus, error) {
+	close(i.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (i *blockingInstaller) Remove(context.Context, install.Instance) error {
+	close(i.removed)
+	return nil
+}
+
+func (i *blockingInstaller) Template(context.Context, install.Instance) ([]byte, error) {
+	return nil, nil
+}
+
+func TestReconciliationTimeoutAllowsPendingDeletionToProceed(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "blocked",
+			Namespace:  "default",
+			Finalizers: []string{apps.FinalizerName},
+		},
+		Spec: appsv1.InstanceSpec{
+			Kind: appsv1.InstanceKindHelm,
+			URL:  "oci://example.test/blocked",
+		},
+	}
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.Instance{}).
+		WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			instance,
+		).
+		Build()
+	applier := &blockingInstaller{started: make(chan struct{}), removed: make(chan struct{})}
+	reconciler := &InstanceReconciler{
+		Client:                       cli,
+		Scheme:                       scheme,
+		Applier:                      applier,
+		AllowClusterScopedNamespaces: map[string]struct{}{},
+	}
+	controller, err := ctrlcontroller.NewUnmanaged("timeout-test", ctrlcontroller.Options{
+		Reconciler:            reconciler,
+		ReconciliationTimeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("create controller: %v", err)
+	}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
+	result := make(chan error, 1)
+	go func() {
+		_, err := controller.Reconcile(t.Context(), request)
+		result <- err
+	}()
+
+	select {
+	case <-applier.started:
+	case <-time.After(time.Second):
+		t.Fatal("Apply() did not start")
+	}
+	current := &appsv1.Instance{}
+	if err := cli.Get(t.Context(), request.NamespacedName, current); err != nil {
+		t.Fatalf("get instance before delete: %v", err)
+	}
+	if err := cli.Delete(t.Context(), current); err != nil {
+		t.Fatalf("delete instance: %v", err)
+	}
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("first Reconcile() error = %v, want deadline exceeded", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first Reconcile() did not time out")
+	}
+
+	if _, err := controller.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("deletion Reconcile() error = %v", err)
+	}
+	select {
+	case <-applier.removed:
+	default:
+		t.Fatal("deletion Reconcile() did not call Remove()")
+	}
+}
 
 type countingInstaller struct {
 	applyCount int

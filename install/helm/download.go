@@ -59,7 +59,7 @@ func LocateChart(ctx context.Context, repoURL, name, version string, cachedir st
 }
 
 func HTTPGet(ctx context.Context, href string) (io.ReadCloser, error) {
-	req, err := http.NewRequest(http.MethodGet, href, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, href, nil)
 	if err != nil {
 		return nil, err
 	}

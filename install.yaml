@@ -597,6 +597,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --leader-election
+            - --reconciliation-timeout=15m
             - --probe-addr=:8080
             - --metrics-addr=:9100
           env:

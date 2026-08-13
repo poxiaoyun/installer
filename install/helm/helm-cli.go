@@ -1,6 +1,7 @@
 package helm
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
@@ -75,7 +77,7 @@ func LoadAndUpdateChart(ctx context.Context, repo, nameOrPath, version, username
 			Out:              log.Default().Writer(),
 			ChartPath:        chartPath,
 			SkipUpdate:       false,
-			Getters:          getter.All(settings),
+			Getters:          getterProvidersForContext(ctx, settings),
 			RepositoryConfig: settings.RepositoryConfig,
 			RepositoryCache:  settings.RepositoryCache,
 			Debug:            settings.Debug,
@@ -123,11 +125,15 @@ func LocateChartSuper(ctx context.Context, repoURL, name, version, username, pas
 	return repou.ResolveReference(downloadu).Path, nil
 }
 
-func downloadChart(_ context.Context, repourl, name, version, username, password string) (string, error) {
+func downloadChart(ctx context.Context, repourl, name, version, username, password string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	settings := cli.New()
+	getters := getterProvidersForContext(ctx, settings)
 	dl := downloader.ChartDownloader{
 		Out:              os.Stdout,
-		Getters:          getter.All(settings),
+		Getters:          getters,
 		RepositoryConfig: settings.RepositoryConfig,
 		RepositoryCache:  settings.RepositoryCache,
 		Options: []getter.Option{
@@ -147,6 +153,9 @@ func downloadChart(_ context.Context, repourl, name, version, username, password
 				Transport: &http.Transport{
 					TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 				},
+			}
+			if deadline, ok := ctx.Deadline(); ok {
+				insecureHTTPClient.Timeout = time.Until(deadline)
 			}
 			registryOpts := []registry.ClientOption{
 				registry.ClientOptDebug(settings.Debug),
@@ -171,7 +180,7 @@ func downloadChart(_ context.Context, repourl, name, version, username, password
 				name, version,
 				"", "", "", // cert key ca
 				true, username != "", // insecureTLS passCredentialsAll
-				dl.Getters)
+				getters)
 			if err != nil {
 				return "", err
 			}
@@ -186,6 +195,36 @@ func downloadChart(_ context.Context, repourl, name, version, username, password
 		return filename, fmt.Errorf("failed to download %s: %w", name, err)
 	}
 	return filename, nil
+}
+
+func getterProvidersForContext(ctx context.Context, settings *cli.EnvSettings) getter.Providers {
+	providers := getter.All(settings)
+	for index := range providers {
+		constructor := providers[index].New
+		providers[index].New = func(options ...getter.Option) (getter.Getter, error) {
+			delegate, err := constructor(options...)
+			if err != nil {
+				return nil, err
+			}
+			return &contextDeadlineGetter{ctx: ctx, delegate: delegate}, nil
+		}
+	}
+	return providers
+}
+
+type contextDeadlineGetter struct {
+	ctx      context.Context
+	delegate getter.Getter
+}
+
+func (g *contextDeadlineGetter) Get(url string, options ...getter.Option) (*bytes.Buffer, error) {
+	if err := g.ctx.Err(); err != nil {
+		return nil, err
+	}
+	if deadline, ok := g.ctx.Deadline(); ok {
+		options = append(options, getter.WithTimeout(time.Until(deadline)))
+	}
+	return g.delegate.Get(url, options...)
 }
 
 func InstallerUserAgent() string {

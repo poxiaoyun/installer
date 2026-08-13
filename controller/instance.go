@@ -60,7 +60,10 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.Instance{}).
-		WithOptions(controller.Options{MaxConcurrentReconciles: options.Concurrency}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: options.Concurrency,
+			ReconciliationTimeout:   options.ReconciliationTimeout,
+		}).
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &corev1.ConfigMap{}, ValueFromEventHandler[*corev1.ConfigMap](cli, "ConfigMap")),
 		).
@@ -214,6 +217,9 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// sync
 	err := r.Sync(ctx, instance)
+	if ctx.Err() != nil {
+		return ctrl.Result{}, ctx.Err()
+	}
 	if err != nil {
 		instance.Status.Phase = appsv1.PhaseFailed
 		instance.Status.Message = err.Error()

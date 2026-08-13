@@ -10,6 +10,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/release"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -17,10 +20,178 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
+	"xiaoshiai.cn/installer/install"
 	"xiaoshiai.cn/installer/install/download"
+	installerhelm "xiaoshiai.cn/installer/install/helm"
 )
 
 var _ = Describe("Chart Secret artifacts", func() {
+	It("recovers a Helm install interrupted after creating its pending release", func() {
+		const namespace = "default"
+		const name = "pending-install-recovery"
+		values := map[string]any{"value": "recovered"}
+		loadedChart := recoveryChart("0.1.0", validRecoveryTemplate)
+		helmConfig, err := installerhelm.NewHelmConfig(ctx, namespace, cfg)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(helmConfig.Releases.Create(&release.Release{
+			Name:      name,
+			Namespace: namespace,
+			Chart:     loadedChart,
+			Config:    values,
+			Info: &release.Info{
+				Status:      release.StatusPendingInstall,
+				Description: "simulated interrupted install",
+			},
+			Version: 1,
+		})).To(Succeed())
+
+		result, err := installerhelm.ApplyChart(ctx, cfg, name, namespace, loadedChart, values, installerhelm.Options{}, nil, "pending-install-recovery")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Info.Status).To(Equal(release.StatusDeployed))
+		DeferCleanup(func() {
+			_, err := installerhelm.RemoveChart(ctx, cfg, name, namespace, installerhelm.Options{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	It("recovers a Helm upgrade interrupted after creating its pending release", func() {
+		const namespace = "default"
+		instance := install.Instance{
+			Name:      "pending-upgrade-recovery",
+			Namespace: namespace,
+			Kind:      appsv1.InstanceKindHelm,
+			Location:  testhelmdir,
+			Values: map[string]any{
+				"global": map[string]any{"replicas": 1, "paused": false},
+			},
+		}
+		applier := installerhelm.New(cfg)
+		_, err := applier.Apply(ctx, instance)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(applier.Remove(ctx, instance)).To(Succeed()) })
+
+		helmConfig, err := installerhelm.NewHelmConfig(ctx, namespace, cfg)
+		Expect(err).NotTo(HaveOccurred())
+		current, err := action.NewGet(helmConfig).Run(instance.Name)
+		Expect(err).NotTo(HaveOccurred())
+		pending := *current
+		pending.Version = current.Version + 1
+		pending.Info = &release.Info{
+			FirstDeployed: current.Info.FirstDeployed,
+			LastDeployed:  current.Info.LastDeployed,
+			Status:        release.StatusPendingUpgrade,
+			Description:   "simulated interrupted upgrade",
+		}
+		Expect(helmConfig.Releases.Create(&pending)).To(Succeed())
+
+		instance.Values = map[string]any{
+			"global": map[string]any{"replicas": 2, "paused": false},
+		}
+		status, err := applier.Apply(ctx, instance)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(status.Values).To(Equal(instance.Values))
+	})
+
+	It("retries an initial install after rendering fails", func() {
+		const namespace = "default"
+		const name = "initial-render-recovery"
+		values := map[string]any{"value": "recovered"}
+		_, err := installerhelm.ApplyChart(
+			ctx,
+			cfg,
+			name,
+			namespace,
+			recoveryChart("0.1.0", `{{ fail "simulated initial render failure" }}`),
+			values,
+			installerhelm.Options{},
+			nil,
+			"initial-render-failure",
+		)
+		Expect(err).To(MatchError(ContainSubstring("simulated initial render failure")))
+
+		helmConfig, err := installerhelm.NewHelmConfig(ctx, namespace, cfg)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = action.NewGet(helmConfig).Run(name)
+		Expect(err).To(MatchError(ContainSubstring("release: not found")))
+
+		result, err := installerhelm.ApplyChart(
+			ctx,
+			cfg,
+			name,
+			namespace,
+			recoveryChart("0.1.0", validRecoveryTemplate),
+			values,
+			installerhelm.Options{},
+			nil,
+			"initial-render-recovered",
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.Version).To(Equal(1))
+		DeferCleanup(func() {
+			_, err := installerhelm.RemoveChart(ctx, cfg, name, namespace, installerhelm.Options{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	It("retries an upgrade after rendering fails", func() {
+		const namespace = "default"
+		const name = "upgrade-render-recovery"
+		initialValues := map[string]any{"value": "initial"}
+		initial, err := installerhelm.ApplyChart(
+			ctx,
+			cfg,
+			name,
+			namespace,
+			recoveryChart("0.1.0", validRecoveryTemplate),
+			initialValues,
+			installerhelm.Options{},
+			nil,
+			"upgrade-render-initial",
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(initial.Version).To(Equal(1))
+		DeferCleanup(func() {
+			_, err := installerhelm.RemoveChart(ctx, cfg, name, namespace, installerhelm.Options{})
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		updatedValues := map[string]any{"value": "updated"}
+		_, err = installerhelm.ApplyChart(
+			ctx,
+			cfg,
+			name,
+			namespace,
+			recoveryChart("0.2.0", `{{ fail "simulated upgrade render failure" }}`),
+			updatedValues,
+			installerhelm.Options{},
+			nil,
+			"upgrade-render-failure",
+		)
+		Expect(err).To(MatchError(ContainSubstring("simulated upgrade render failure")))
+
+		helmConfig, err := installerhelm.NewHelmConfig(ctx, namespace, cfg)
+		Expect(err).NotTo(HaveOccurred())
+		current, err := action.NewGet(helmConfig).Run(name)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(current.Version).To(Equal(1))
+		Expect(current.Info.Status).To(Equal(release.StatusDeployed))
+
+		updated, err := installerhelm.ApplyChart(
+			ctx,
+			cfg,
+			name,
+			namespace,
+			recoveryChart("0.2.0", validRecoveryTemplate),
+			updatedValues,
+			installerhelm.Options{},
+			nil,
+			"upgrade-render-recovered",
+		)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(updated.Version).To(Equal(2))
+		Expect(updated.Config).To(Equal(updatedValues))
+	})
+
 	It("installs, upgrades, reports the digest, and uninstalls without deleting artifacts", func() {
 		const namespace = "default"
 		archiveV1 := controllerTestChartArchive("0.1.0", "one")
@@ -164,6 +335,25 @@ var _ = Describe("Chart Secret artifacts", func() {
 		Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
 	})
 })
+
+const validRecoveryTemplate = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+data:
+  value: {{ .Values.value | quote }}
+`
+
+func recoveryChart(version, manifest string) *chart.Chart {
+	return &chart.Chart{
+		Metadata: &chart.Metadata{APIVersion: "v2", Name: "recovery-test", Version: version},
+		Values:   map[string]any{"value": "default"},
+		Templates: []*chart.File{{
+			Name: "templates/configmap.yaml",
+			Data: []byte(manifest),
+		}},
+	}
+}
 
 func eventuallyInstalledArtifact(instance *appsv1.Instance, digest, version string) {
 	Eventually(func() bool {

@@ -49,9 +49,17 @@ func NewHelmConfig(ctx context.Context, namespace string, cfg *rest.Config) (*ac
 		baselog.Info(fmt.Sprintf(format, v...))
 	}
 
+	operationConfig := rest.CopyConfig(cfg)
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if operationConfig.Timeout == 0 || remaining < operationConfig.Timeout {
+			operationConfig.Timeout = remaining
+		}
+	}
+
 	cligetter := genericclioptions.NewConfigFlags(true)
 	cligetter.WrapConfigFn = func(*rest.Config) *rest.Config {
-		return cfg
+		return operationConfig
 	}
 
 	config := &action.Configuration{}
@@ -100,16 +108,25 @@ func ApplyChart(ctx context.Context, cfg *rest.Config, rlsname, namespace string
 		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr, desiredState)
 	}
 
-	// Handle pending/failed states that may block operations
-	switch existRelease.Info.Status {
-	case release.StatusPendingInstall, release.StatusPendingUpgrade, release.StatusPendingRollback:
+	// Remove the incomplete revision left when a Helm process was interrupted.
+	// A pending install has no earlier release and starts again, while an
+	// interrupted upgrade or rollback resumes from the preceding revision.
+	if existRelease.Info.Status.IsPending() {
 		log.Info("release in pending state, attempting recovery", "status", existRelease.Info.Status)
 		if err := recoverPendingRelease(ctx, helmcfg, rlsname, existRelease); err != nil {
 			return nil, fmt.Errorf("failed to recover from pending state: %w", err)
 		}
-		// After recovery, proceed with fresh install
-		return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr, desiredState)
+		existRelease, err = action.NewGet(helmcfg).Run(rlsname)
+		if err != nil {
+			if !errors.Is(err, driver.ErrReleaseNotFound) {
+				return nil, err
+			}
+			return installChart(ctx, helmcfg, loadedChart, rlsname, namespace, values, options, pr, desiredState)
+		}
+	}
 
+	// Handle states that affect the next operation.
+	switch existRelease.Info.Status {
 	case release.StatusUninstalling:
 		log.Info("release is uninstalling, waiting for completion")
 		return nil, fmt.Errorf("release is being uninstalled, please retry later")
