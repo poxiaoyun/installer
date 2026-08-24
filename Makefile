@@ -60,7 +60,7 @@ install.yaml:
 	helm template installer --include-crds --namespace rune-system deploy/installer > install.yaml
 
 release-image: build-binaries
-	docker buildx build --platform linux/amd64,linux/arm64 -t ${IMAGE_REGISTRY}/xiaoshiai/installer:${GIT_VERSION} --push -f Dockerfile ${BIN_DIR}
+	docker buildx build --platform linux/amd64,linux/arm64 --provenance=false -t ${IMAGE_REGISTRY}/xiaoshiai/installer:${GIT_VERSION} --push -f Dockerfile ${BIN_DIR}
 
 
 build-helm:
