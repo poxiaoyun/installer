@@ -77,7 +77,6 @@ spec:
             {{- if .Values.installer.leaderElection.enabled }}
             - --leader-election
             {{- end }}
-            - --reconciliation-timeout={{ .Values.installer.reconciliationTimeout }}
             - --probe-addr=:{{- .Values.installer.containerPorts.probe }}
             {{- if .Values.installer.metrics.enabled }}
             - --metrics-addr=:{{- .Values.installer.metrics.service.port }}
@@ -86,12 +85,10 @@ spec:
             {{- include "common.tplvalues.render" (dict "value" .Values.installer.extraArgs "context" $) | nindent 12 }}
             {{- end }}
           {{- end }}
+          {{- if .Values.installer.extraEnvVars }}
           env:
-            - name: LOG_LEVEL
-              value: {{ .Values.installer.logLevel }}
-            {{- if .Values.installer.extraEnvVars }}
             {{- include "common.tplvalues.render" (dict "value" .Values.installer.extraEnvVars "context" $) | nindent 12 }}
-            {{- end }}
+          {{- end }}
           {{- if or .Values.installer.extraEnvVarsCM .Values.installer.extraEnvVarsSecret }}
           envFrom:
             {{- if .Values.installer.extraEnvVarsCM }}

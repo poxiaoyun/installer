@@ -111,6 +111,52 @@ spec: {}
 	}
 }
 
+func TestPausedRendererPausesHPATargetWithoutChangingAutoscaler(t *testing.T) {
+	objects := mustParseObjects(t, `
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web}
+spec: {replicas: 3}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: web-autoscaler}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 1
+  maxReplicas: 10
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+`)
+	wantAutoscaler := objectByName(t, objects, "web-autoscaler").DeepCopy().Object
+
+	got, err := (&PausedRenderer{Paused: true}).ModifyObjects(objects)
+	if err != nil {
+		t.Fatalf("ModifyObjects() error = %v", err)
+	}
+	replicas, found, err := unstructured.NestedInt64(
+		objectByName(t, got, "web").Object,
+		"spec", "replicas",
+	)
+	if err != nil || !found || replicas != 0 {
+		t.Fatalf("Deployment replicas = %d, found=%v, err=%v; want 0", replicas, found, err)
+	}
+	if !reflect.DeepEqual(objectByName(t, got, "web-autoscaler").Object, wantAutoscaler) {
+		t.Fatal("HorizontalPodAutoscaler changed while its target was paused")
+	}
+}
+
 func assertDaemonSetPausedAffinity(t *testing.T, daemonset *unstructured.Unstructured, wantTerms int) {
 	t.Helper()
 	terms, found, err := unstructured.NestedSlice(daemonset.Object,

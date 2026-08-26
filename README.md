@@ -101,6 +101,7 @@ my-nginx   Installed   default     10.2.1    2s                 2s
 ## Contributing
 
 Contributions are welcome! Please open issues and submit pull requests for any features, bug fixes, or improvements.
+Architecture, ownership, and durable invariants are documented in [DESIGN.md](DESIGN.md).
 
 ## License
 

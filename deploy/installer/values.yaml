@@ -69,10 +69,6 @@ installer:
     runAsNonRoot: true
   leaderElection:
     enabled: true
-  # Hard limit for a complete Instance reconciliation. Keep this longer than
-  # the Helm operation timeout (10m by default) so Helm can record failures.
-  reconciliationTimeout: 15m
-  logLevel: debug
   existingConfigmap: ""
   command: []
   args: []

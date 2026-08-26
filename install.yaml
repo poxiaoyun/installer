@@ -597,12 +597,8 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --leader-election
-            - --reconciliation-timeout=15m
             - --probe-addr=:8080
             - --metrics-addr=:9100
-          env:
-            - name: LOG_LEVEL
-              value: debug
           resources:
             limits:
               cpu: "1"

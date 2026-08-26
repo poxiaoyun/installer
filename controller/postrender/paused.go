@@ -8,6 +8,10 @@ import (
 //   - Deployment/StatefulSet: sets spec.replicas = 0
 //   - Job/CronJob: sets spec.suspend = true
 //   - DaemonSet: adds an intentionally unsatisfiable required node affinity
+//
+// HorizontalPodAutoscaler objects remain unchanged. An HPA whose minReplicas
+// is greater than zero enters Kubernetes maintenance-mode deactivation when
+// its scale target's desired replicas are zero.
 type PausedRenderer struct {
 	Paused bool
 }
