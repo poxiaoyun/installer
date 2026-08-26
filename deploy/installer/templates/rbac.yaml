@@ -3,7 +3,6 @@ kind: ClusterRoleBinding
 apiVersion: {{ include "common.capabilities.rbac.apiVersion" . }}
 metadata:
   name: {{ include "installer.fullname" . }}
-  namespace: {{ .Release.Namespace | quote }}
   labels: {{- include "common.labels.standard" . | nindent 4 }}
     app.kubernetes.io/component: installer
     {{- if .Values.commonLabels }}
@@ -25,11 +24,11 @@ subjects:
     name: {{ template "installer.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 ---
-{{- if not .Values.rbac.useClusterAdmin -}}
+{{ if not .Values.rbac.useClusterAdmin -}}
 kind: ClusterRole
 apiVersion: {{ include "common.capabilities.rbac.apiVersion" . }}
+metadata:
   name: {{ include "installer.fullname" . }}
-  namespace: {{ .Release.Namespace | quote }}
   labels: {{- include "common.labels.standard" . | nindent 4 }}
     app.kubernetes.io/component: installer
     {{- if .Values.commonLabels }}

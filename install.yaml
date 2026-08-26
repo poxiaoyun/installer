@@ -529,10 +529,10 @@ metadata:
   namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
-    helm.sh/chart: installer-0.0.0
+    helm.sh/chart: installer-1.1.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: "0.0.0"
+    app.kubernetes.io/version: "v1.1.0"
     app.kubernetes.io/component: installer
 ---
 # Source: installer/templates/rbac.yaml
@@ -540,13 +540,12 @@ kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: installer
-  namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
-    helm.sh/chart: installer-0.0.0
+    helm.sh/chart: installer-1.1.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: "0.0.0"
+    app.kubernetes.io/version: "v1.1.0"
     app.kubernetes.io/component: installer
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -556,6 +555,7 @@ subjects:
   - kind: ServiceAccount
     name: installer
     namespace: rune-system
+
 ---
 # Source: installer/templates/deployment.yaml
 apiVersion: apps/v1
@@ -565,10 +565,10 @@ metadata:
   namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
-    helm.sh/chart: installer-0.0.0
+    helm.sh/chart: installer-1.1.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: "0.0.0"
+    app.kubernetes.io/version: "v1.1.0"
     app.kubernetes.io/component: installer
 spec:
   replicas: 1
@@ -583,17 +583,17 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: installer
-        helm.sh/chart: installer-0.0.0
+        helm.sh/chart: installer-1.1.0
         app.kubernetes.io/instance: installer
         app.kubernetes.io/managed-by: Helm
-        app.kubernetes.io/version: "0.0.0"
+        app.kubernetes.io/version: "v1.1.0"
         app.kubernetes.io/component: installer
     spec:
       serviceAccountName: installer
       
       containers:
         - name: installer
-          image: registry.cn-hangzhou.aliyuncs.com/xiaoshiai/installer:0.0.0
+          image: registry.cn-hangzhou.aliyuncs.com/xiaoshiai/installer:v1.1.0
           imagePullPolicy: IfNotPresent
           args:
             - --leader-election

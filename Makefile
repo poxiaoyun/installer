@@ -56,8 +56,9 @@ test:
 	go tool cover -func=cover.out | grep total: | awk '{print "Total Coverage: " $$3}'
 
 .PHONY: install.yaml
-install.yaml:
-	helm template installer --include-crds --namespace rune-system deploy/installer > install.yaml
+install.yaml: build-helm
+	helm template installer --include-crds --namespace rune-system \
+		${BIN_DIR}/installer-${VERSION}.tgz > install.yaml
 
 release-image: build-binaries
 	docker buildx build --platform linux/amd64,linux/arm64 --provenance=false -t ${IMAGE_REGISTRY}/xiaoshiai/installer:${GIT_VERSION} --push -f Dockerfile ${BIN_DIR}
