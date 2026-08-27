@@ -9,7 +9,7 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 - **Permission control**: cluster-scoped and cross-namespace resources are denied by default; allow per namespace via startup flag `--allow-cluster-scoped-namespaces` or annotation `apps.xiaoshiai.cn/allow-cluster-scoped: "true"`
 - **Common metadata extension**: explicitly injects `values.global.commonLabels` and `values.global.commonAnnotations` into resources and Pod templates; `app.kubernetes.io/instance` is always enforced independently
 - **Raw manifest extension**: append YAML or JSON Kubernetes objects through ordered `RawManifest` extensions; generated objects pass through the same namespace, identity, and pause enforcement
-- **Dependency management**: instance dependencies via `spec.dependencies`
+- **Dependency management**: `spec.dependencies` gates execution of a new Instance generation; unmet prerequisites project `Waiting`, while later dependency health changes do not affect an already installed generation
 - **Values from external sources**: reference ConfigMap / Secret via `spec.valuesFrom`
 - **Immutable chart artifacts**: install Helm charts from a same-namespace immutable Secret with SHA-256 verification
 - **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; scale status reports the current non-terminal Pods selected by the instance label plus the optional `app.kubernetes.io/scale-pod-selector` annotation; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet

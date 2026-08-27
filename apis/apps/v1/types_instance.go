@@ -183,7 +183,7 @@ type InstanceStatus struct {
 	// exposed through the scale subresource.
 	Selector string `json:"selector,omitempty"`
 
-	// Phase is the current state of the release
+	// Phase is the current lifecycle or runtime state of the Instance.
 	Phase Phase `json:"phase,omitempty"`
 
 	// Message is the message associated with the status
@@ -286,6 +286,7 @@ const (
 const (
 	// Lifecycle Phases
 	PhaseReconciling Phase = "Reconciling" // Reconciling (Installing/Updating)
+	PhaseWaiting     Phase = "Waiting"     // Waiting for an external prerequisite
 	PhaseTerminating Phase = "Terminating" // Terminating
 	PhaseInstalled   Phase = "Installed"   // Installed (No workload)
 	PhaseFailed      Phase = "Failed"      // Failed (Installation failed or runtime failed)
@@ -343,7 +344,8 @@ type EndpointRelation string
 
 // Condition types for Instance
 const (
-	// ConditionDependenciesReady indicates whether all dependencies are ready.
+	// ConditionDependenciesReady indicates whether dependencies satisfied the
+	// ordering prerequisite for the current generation's execution.
 	ConditionDependenciesReady = "DependenciesReady"
 	// ConditionInstalled indicates whether the instance has been successfully installed.
 	ConditionInstalled = "Installed"

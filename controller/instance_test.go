@@ -377,7 +377,7 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("should set Failed phase when dependency is not ready", func() {
+	It("should wait and resume when dependency becomes ready", func() {
 		// Create a plugin with a non-existent dependency
 		plugin := &appsv1.Instance{
 			ObjectMeta: metav1.ObjectMeta{
@@ -400,17 +400,31 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 		err := k8sClient.Create(ctx, plugin)
 		Expect(err).NotTo(HaveOccurred())
 
-		// Wait for phase to be set - should be Failed due to missing dependency
-		err = waitPhaseSet(ctx, plugin)
+		// A missing dependency is an expected wait, not a reconciliation failure.
+		err = waitForPhase(ctx, plugin, appsv1.PhaseWaiting)
 		Expect(err).NotTo(HaveOccurred())
-
-		// Phase should be Failed
-		Expect(plugin.Status.Phase).To(Equal(appsv1.PhaseFailed))
+		Expect(plugin.Status.Message).To(ContainSubstring("dependency default/non-existent-dependency is not found"))
 
 		// Verify DependenciesReady condition is false
 		depsCondition := meta.FindStatusCondition(plugin.Status.Conditions, appsv1.ConditionDependenciesReady)
 		Expect(depsCondition).NotTo(BeNil())
 		Expect(depsCondition.Status).To(Equal(metav1.ConditionFalse))
+		Expect(depsCondition.Reason).To(Equal(controller.ReasonDependencyNotReady))
+
+		dependency := &appsv1.Instance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "non-existent-dependency",
+				Namespace: "default",
+			},
+			Spec: appsv1.InstanceSpec{
+				Kind:    appsv1.InstanceKindHelm,
+				Path:    "testdata/helm-test",
+				URL:     "file://" + testhelmdir,
+				Version: "v0.0.0",
+			},
+		}
+		Expect(k8sClient.Create(ctx, dependency)).To(Succeed())
+		Expect(waitForPhase(ctx, plugin, appsv1.PhaseInstalled)).To(Succeed())
 	})
 
 	It("should set Message when installation fails and clear on success", func() {
@@ -456,7 +470,7 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 	})
 
 	It("cleanup test instances", func() {
-		instances := []string{"obs-gen-test", "condition-test", "phase-transition-test", "pending-dep-test", "last-error-test"}
+		instances := []string{"obs-gen-test", "condition-test", "phase-transition-test", "pending-dep-test", "non-existent-dependency", "last-error-test"}
 		for _, name := range instances {
 			plugin := &appsv1.Instance{
 				ObjectMeta: metav1.ObjectMeta{
@@ -475,6 +489,7 @@ var _ = Describe("Phase status tests", func() {
 	It("should verify all phase constants are valid", func() {
 		// Verify all phase constants exist and have expected values
 		Expect(string(appsv1.PhaseInstalled)).To(Equal("Installed"))
+		Expect(string(appsv1.PhaseWaiting)).To(Equal("Waiting"))
 		Expect(string(appsv1.PhaseFailed)).To(Equal("Failed"))
 	})
 

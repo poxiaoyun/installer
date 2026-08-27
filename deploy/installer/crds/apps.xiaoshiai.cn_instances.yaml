@@ -438,7 +438,8 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: Phase is the current state of the release
+                description: Phase is the current lifecycle or runtime state of the
+                  Instance.
                 type: string
               replicas:
                 description: |-

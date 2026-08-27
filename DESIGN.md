@@ -45,7 +45,13 @@ mechanics.
 One reconciliation follows this order:
 
 1. Load the Instance and establish its finalizer.
-2. Require every declared dependency to be installed.
+2. Before executing a generation that has not yet installed successfully,
+   observe every declared dependency. A missing or unready dependency projects
+   `Waiting` with a false dependency condition and ends reconciliation
+   successfully; dependency Instance changes enqueue dependents whose current
+   generation has not installed successfully. Dependencies are ordering
+   prerequisites, not runtime health inputs, so their later state does not
+   affect an installed dependent.
 3. Validate the source, resolve values and repository credentials, and create
    one `install.Instance` input.
 4. Build the common post-render pipeline.
@@ -192,6 +198,11 @@ do not replace the independently computed runtime phase. Default observation
 supports workload states and common Service, Ingress, LoadBalancer, NodePort,
 and SSH endpoints; CEL annotations may replace states or endpoints and add
 summary or additional endpoints.
+
+`Waiting` means the current generation has been observed but execution is
+blocked on an expected external prerequisite. `Reconciling` means installation
+or update work is actively proceeding, while `Failed` is reserved for an
+actual reconciliation or runtime failure.
 
 Conditions describe independent guarantees: dependencies, successful
 installation, runtime readiness, expression evaluation, and safe scale

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -141,6 +142,141 @@ func (c *countingInstaller) Template(context.Context, install.Instance) ([]byte,
 	return nil, nil
 }
 
+func TestMissingDependencyWaitsWithoutReconcileError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "dependent",
+			Namespace:  "default",
+			Generation: 1,
+			Finalizers: []string{apps.FinalizerName},
+		},
+		Spec: appsv1.InstanceSpec{
+			Dependencies: []corev1.ObjectReference{{Name: "database"}},
+		},
+	}
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.Instance{}).
+		WithObjects(instance).
+		Build()
+	applier := &countingInstaller{}
+	reconciler := &InstanceReconciler{Client: cli, Scheme: scheme, Applier: applier}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
+
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v, want expected dependency wait", err)
+	}
+	if applier.applyCount != 0 {
+		t.Fatalf("Apply() calls = %d, want 0", applier.applyCount)
+	}
+
+	current := &appsv1.Instance{}
+	if err := cli.Get(t.Context(), request.NamespacedName, current); err != nil {
+		t.Fatalf("get Instance: %v", err)
+	}
+	if current.Status.Phase != appsv1.PhaseWaiting {
+		t.Fatalf("phase = %q, want %q", current.Status.Phase, appsv1.PhaseWaiting)
+	}
+	if current.Status.ObservedGeneration != current.Generation {
+		t.Fatalf("observed generation = %d, want %d", current.Status.ObservedGeneration, current.Generation)
+	}
+	condition := meta.FindStatusCondition(current.Status.Conditions, appsv1.ConditionDependenciesReady)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != ReasonDependencyNotReady {
+		t.Fatalf("DependenciesReady condition = %#v, want False/%s", condition, ReasonDependencyNotReady)
+	}
+}
+
+func TestInstalledInstanceIgnoresUnreadyDependency(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "dependent", Namespace: "default", Generation: 1},
+		Spec: appsv1.InstanceSpec{
+			URL:          "oci://example.test/dependent",
+			Dependencies: []corev1.ObjectReference{{Name: "database"}},
+		},
+		Status: appsv1.InstanceStatus{
+			ObservedGeneration: 1,
+			Phase:              appsv1.PhaseInstalled,
+			Values: appsv1.Values{Object: map[string]any{
+				"global": map[string]any{"replicas": float64(1)},
+			}},
+			Conditions: []metav1.Condition{{
+				Type:               appsv1.ConditionInstalled,
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 1,
+				Reason:             ReasonInstalled,
+			}},
+		},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+	applier := &countingInstaller{}
+	reconciler := &InstanceReconciler{Client: cli, Scheme: scheme, Applier: applier}
+
+	if err := reconciler.Sync(t.Context(), instance); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if applier.applyCount != 0 {
+		t.Fatalf("Apply() calls = %d, want 0", applier.applyCount)
+	}
+	if instance.Status.Phase != appsv1.PhaseInstalled {
+		t.Fatalf("phase = %q, want %q", instance.Status.Phase, appsv1.PhaseInstalled)
+	}
+}
+
+func TestDependencyEventRequestsDependents(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+	dependent := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "apps"},
+		Spec: appsv1.InstanceSpec{
+			Dependencies: []corev1.ObjectReference{{Name: "database", Namespace: "data"}},
+		},
+		Status: appsv1.InstanceStatus{Phase: appsv1.PhaseWaiting},
+	}
+	installed := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "apps", Generation: 1},
+		Spec: appsv1.InstanceSpec{
+			Dependencies: []corev1.ObjectReference{{Name: "database", Namespace: "data"}},
+		},
+		Status: appsv1.InstanceStatus{Conditions: []metav1.Condition{{
+			Type:               appsv1.ConditionInstalled,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: 1,
+		}}},
+	}
+	unrelated := &appsv1.Instance{ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "apps"}}
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&appsv1.Instance{}, instanceDependencyIndexField, instanceDependencyIndexValues).
+		WithObjects(dependent, installed, unrelated).
+		Build()
+	handler := dependencyEventHandler{Client: cli}
+	dependency := &appsv1.Instance{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "data"}}
+
+	requests := handler.requestsFor(t.Context(), dependency)
+	want := []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(dependent)}}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+}
+
 func TestSyncInstallAppliesOncePerDesiredState(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -251,8 +387,9 @@ func TestExecutionUpToDate(t *testing.T) {
 				Values:             appsv1.Values{Object: map[string]any{"replicas": int64(1)}},
 				Extensions:         []appsv1.Extension{{Name: "common-metadata", Kind: apps.ExtensionKindCommonMetadata}},
 				Conditions: []metav1.Condition{{
-					Type:   appsv1.ConditionInstalled,
-					Status: metav1.ConditionTrue,
+					Type:               appsv1.ConditionInstalled,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: 2,
 				}},
 			},
 		}

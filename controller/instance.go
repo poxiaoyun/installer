@@ -41,6 +41,9 @@ import (
 
 func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	cfg, cli := mgr.GetConfig(), mgr.GetClient()
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &appsv1.Instance{}, instanceDependencyIndexField, instanceDependencyIndexValues); err != nil {
+		return fmt.Errorf("index Instance dependencies: %w", err)
+	}
 	allowNS := make(map[string]struct{}, len(options.AllowClusterScopedNamespaces))
 	for _, ns := range options.AllowClusterScopedNamespaces {
 		allowNS[ns] = struct{}{}
@@ -73,8 +76,52 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &corev1.Pod{}, typedDynamicWatchEventHandler[*corev1.Pod](runtimeResourceEventMapper)),
 		).
+		WatchesRawSource(
+			source.TypedKind(mgr.GetCache(), &appsv1.Instance{}, dependencyEventHandler{Client: cli}.Handler()),
+		).
 		WatchesRawSource(dynamicSources).
 		Complete(r)
+}
+
+const instanceDependencyIndexField = "spec.dependencies.instance"
+
+type dependencyEventHandler struct {
+	Client client.Client
+}
+
+func (d dependencyEventHandler) Handler() handler.TypedEventHandler[*appsv1.Instance, reconcile.Request] {
+	return handler.TypedEnqueueRequestsFromMapFunc(d.requestsFor)
+}
+
+func (d dependencyEventHandler) requestsFor(ctx context.Context, dependency *appsv1.Instance) []reconcile.Request {
+	instances := &appsv1.InstanceList{}
+	dependencyKey := client.ObjectKeyFromObject(dependency)
+	if err := d.Client.List(ctx, instances, client.MatchingFields{instanceDependencyIndexField: dependencyKey.String()}); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "list Instance dependents", "dependency", dependencyKey)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(instances.Items))
+	for i := range instances.Items {
+		if isCurrentGenerationInstalled(&instances.Items[i]) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&instances.Items[i])})
+	}
+	return requests
+}
+
+func instanceDependencyIndexValues(object client.Object) []string {
+	instance := object.(*appsv1.Instance)
+	dependencies := make([]string, 0, len(instance.Spec.Dependencies))
+	for _, reference := range instance.Spec.Dependencies {
+		reference = resolveDependencyReference(instance, reference)
+		if reference.APIVersion != appsv1.GroupVersion.String() || reference.Kind != "Instance" || reference.Name == "" {
+			continue
+		}
+		dependencies = append(dependencies, client.ObjectKey{Namespace: reference.Namespace, Name: reference.Name}.String())
+	}
+	return dependencies
 }
 
 type DynamicWatchEventHandler struct {
@@ -238,8 +285,14 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 }
 
 func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance) error {
-	if err := r.syncDeps(ctx, instance); err != nil {
-		return err
+	if !isCurrentGenerationInstalled(instance) {
+		dependenciesReady, err := r.syncDeps(ctx, instance)
+		if err != nil {
+			return err
+		}
+		if !dependenciesReady {
+			return nil
+		}
 	}
 	if err := r.syncInstall(ctx, instance); err != nil {
 		return err
@@ -253,13 +306,20 @@ func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance
 	return nil
 }
 
-func (r *InstanceReconciler) syncDeps(ctx context.Context, instance *appsv1.Instance) error {
-	if err := r.checkDepenency(ctx, instance); err != nil {
-		r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionFalse, ReasonDependencyNotReady, err.Error())
-		return err
+func (r *InstanceReconciler) syncDeps(ctx context.Context, instance *appsv1.Instance) (bool, error) {
+	readiness, err := r.checkDependencies(ctx, instance)
+	if err != nil {
+		r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionFalse, ReasonDependencyCheckFailed, err.Error())
+		return false, err
+	}
+	if !readiness.ready {
+		instance.Status.Phase = appsv1.PhaseWaiting
+		instance.Status.Message = readiness.message
+		r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionFalse, ReasonDependencyNotReady, readiness.message)
+		return false, nil
 	}
 	r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionTrue, ReasonAllDependenciesReady, "All dependencies are installed")
-	return nil
+	return true, nil
 }
 
 func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.Instance) error {
@@ -352,10 +412,7 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, aut
 }
 
 func executionUpToDate(instance *appsv1.Instance, values map[string]any) bool {
-	if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionInstalled) {
-		return false
-	}
-	if instance.Status.ObservedGeneration != instance.Generation {
+	if !isCurrentGenerationInstalled(instance) {
 		return false
 	}
 	if !utils.EqualMapValues(instance.Status.Values.Object, values) {
@@ -375,6 +432,11 @@ func executionUpToDate(instance *appsv1.Instance, values map[string]any) bool {
 	// necessarily equal the installed Chart metadata version. Any source
 	// field change already increments Instance generation.
 	return instance.Spec.Artifact == nil
+}
+
+func isCurrentGenerationInstalled(instance *appsv1.Instance) bool {
+	condition := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionInstalled)
+	return condition != nil && condition.Status == metav1.ConditionTrue && condition.ObservedGeneration == instance.Generation
 }
 
 func validateInstanceSource(instance *appsv1.Instance) error {
@@ -547,56 +609,57 @@ func convtime(t time.Time) metav1.Time {
 	return metav1.Time{Time: t}
 }
 
-type DependencyError struct {
-	Reason string
-	Object corev1.ObjectReference
+type dependencyReadiness struct {
+	ready   bool
+	message string
 }
 
-func (e DependencyError) Error() string {
-	return fmt.Sprintf("dependency %s/%s :%s", e.Object.Namespace, e.Object.Name, e.Reason)
+func resolveDependencyReference(instance *appsv1.Instance, reference corev1.ObjectReference) corev1.ObjectReference {
+	if reference.Namespace == "" {
+		reference.Namespace = instance.Namespace
+	}
+	if reference.Kind == "" {
+		reference.APIVersion = appsv1.GroupVersion.String()
+		reference.Kind = "Instance"
+	}
+	return reference
 }
 
-func (r *InstanceReconciler) checkDepenency(ctx context.Context, instance *appsv1.Instance) error {
-	for _, dep := range instance.Spec.Dependencies {
-		if dep.Name == "" {
+func (r *InstanceReconciler) checkDependencies(ctx context.Context, instance *appsv1.Instance) (dependencyReadiness, error) {
+	for _, reference := range instance.Spec.Dependencies {
+		if reference.Name == "" {
 			continue
 		}
-		if dep.Namespace == "" {
-			dep.Namespace = instance.Namespace
-		}
-		if dep.Kind == "" {
-			dep.APIVersion = instance.APIVersion
-			dep.Kind = instance.Kind
-		}
-		gvk := schema.FromAPIVersionAndKind(dep.APIVersion, dep.Kind)
+		reference = resolveDependencyReference(instance, reference)
+		gvk := schema.FromAPIVersionAndKind(reference.APIVersion, reference.Kind)
 		newobj, _ := r.Scheme.New(gvk)
 		depobj, ok := newobj.(client.Object)
 		if !ok {
 			depobj = &metav1.PartialObjectMetadata{
 				TypeMeta: metav1.TypeMeta{
 					APIVersion: gvk.GroupVersion().String(),
-					Kind:       dep.Kind,
+					Kind:       reference.Kind,
 				},
 			}
 		}
 
 		// exists check
-		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: dep.Namespace, Name: dep.Name}, depobj); err != nil {
+		if err := r.Client.Get(ctx, client.ObjectKey{Namespace: reference.Namespace, Name: reference.Name}, depobj); err != nil {
 			if apierrors.IsNotFound(err) {
-				return DependencyError{Reason: err.Error(), Object: dep}
+				return dependencyReadiness{message: fmt.Sprintf("dependency %s/%s is not found", reference.Namespace, reference.Name)}, nil
 			}
-			return err
+			return dependencyReadiness{}, err
 		}
 
 		// status check
 		switch obj := depobj.(type) {
 		case *appsv1.Instance:
 			if !meta.IsStatusConditionTrue(obj.Status.Conditions, appsv1.ConditionReady) {
-				return DependencyError{Reason: "not ready", Object: dep}
+				return dependencyReadiness{message: fmt.Sprintf("dependency %s/%s is not ready", reference.Namespace, reference.Name)}, nil
 			}
 		}
 	}
-	return nil
+	return dependencyReadiness{ready: true}, nil
 }
 
 func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1.Instance) (map[string]any, error) {

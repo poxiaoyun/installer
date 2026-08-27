@@ -13,6 +13,7 @@ const (
 	ReasonExpressionsReady           = "ExpressionsReady"
 	ReasonUninstallFailed            = "UninstallFailed"
 	ReasonDependencyNotReady         = "DependencyNotReady"
+	ReasonDependencyCheckFailed      = "DependencyCheckFailed"
 	ReasonAllDependenciesReady       = "AllDependenciesReady"
 	ReasonInvalidSource              = "InvalidSource"
 	ReasonResolveValuesFailed        = "ResolveValuesFailed"
