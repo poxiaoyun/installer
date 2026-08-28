@@ -7,8 +7,8 @@ import (
 	"io"
 	"time"
 
-	"helm.sh/helm/v3/pkg/kube"
-	"helm.sh/helm/v3/pkg/postrender"
+	"helm.sh/helm/v4/pkg/kube"
+	postrender "helm.sh/helm/v4/pkg/postrenderer"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -94,31 +94,14 @@ func newLifecycleKubeClient(delegate kube.Interface) *lifecycleKubeClient {
 	}
 }
 
-func (c *lifecycleKubeClient) Create(resources kube.ResourceList) (*kube.Result, error) {
+func (c *lifecycleKubeClient) Create(resources kube.ResourceList, options ...kube.ClientCreateOption) (*kube.Result, error) {
 	if err := validateResourceList(resources); err != nil {
 		return nil, err
 	}
-	return c.Interface.Create(resources)
+	return c.Interface.Create(resources, options...)
 }
 
-func (c *lifecycleKubeClient) Update(original, target kube.ResourceList, force bool) (*kube.Result, error) {
-	return c.update(original, target, force, false)
-}
-
-func (c *lifecycleKubeClient) UpdateThreeWayMerge(original, target kube.ResourceList, force bool) (*kube.Result, error) {
-	return c.update(original, target, force, true)
-}
-
-func (c *lifecycleKubeClient) update(original, target kube.ResourceList, force, threeWayMerge bool) (*kube.Result, error) {
-	regularUpdate := c.Interface.Update
-	if threeWayMerge {
-		delegate, ok := c.Interface.(kube.InterfaceThreeWayMerge)
-		if !ok {
-			return nil, errors.New("Kubernetes client does not support three-way merge updates")
-		}
-		regularUpdate = delegate.UpdateThreeWayMerge
-	}
-
+func (c *lifecycleKubeClient) Update(original, target kube.ResourceList, options ...kube.ClientUpdateOption) (*kube.Result, error) {
 	// A complete validation pass must happen before the delegate mutates any
 	// resources.
 	if err := validateResourceList(target); err != nil {
@@ -198,7 +181,7 @@ func (c *lifecycleKubeClient) update(original, target kube.ResourceList, force, 
 		}
 	}
 
-	result, err := regularUpdate(regularOriginal, regularTarget, force)
+	result, err := c.Interface.Update(regularOriginal, regularTarget, options...)
 	if err != nil {
 		return result, err
 	}
@@ -259,44 +242,67 @@ func validateResourceList(resources kube.ResourceList) error {
 }
 
 func (c *lifecycleKubeClient) deleteForeground(resources kube.ResourceList) (*kube.Result, []error) {
-	if delegate, ok := c.Interface.(kube.InterfaceDeletionPropagation); ok {
-		return delegate.DeleteWithPropagationPolicy(resources, metav1.DeletePropagationForeground)
-	}
-	return nil, []error{errors.New("Kubernetes client does not support foreground deletion")}
+	return c.Interface.Delete(resources, metav1.DeletePropagationForeground)
 }
 
-func (c *lifecycleKubeClient) WaitForDelete(resources kube.ResourceList, timeout time.Duration) error {
+func (c *lifecycleKubeClient) waitForDelete(resources kube.ResourceList, timeout time.Duration) error {
+	waiter, err := c.Interface.GetWaiter(kube.LegacyStrategy)
+	if err != nil {
+		return err
+	}
+	return waiter.WaitForDelete(resources, timeout)
+}
+
+func (c *lifecycleKubeClient) Delete(resources kube.ResourceList, policy metav1.DeletionPropagation) (*kube.Result, []error) {
+	filtered, err := filterRemoveRetained(resources)
+	if err != nil {
+		return nil, []error{err}
+	}
+	return c.Interface.Delete(filtered, policy)
+}
+
+func (c *lifecycleKubeClient) GetWaiter(strategy kube.WaitStrategy) (kube.Waiter, error) {
+	waiter, err := c.Interface.GetWaiter(strategy)
+	if err != nil {
+		return nil, err
+	}
+	return &lifecycleWaiter{delegate: waiter}, nil
+}
+
+func (c *lifecycleKubeClient) GetWaiterWithOptions(strategy kube.WaitStrategy, options ...kube.WaitOption) (kube.Waiter, error) {
+	delegate, ok := c.Interface.(kube.InterfaceWaitOptions)
+	if !ok {
+		return c.GetWaiter(strategy)
+	}
+	waiter, err := delegate.GetWaiterWithOptions(strategy, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &lifecycleWaiter{delegate: waiter}, nil
+}
+
+type lifecycleWaiter struct {
+	delegate kube.Waiter
+}
+
+func (w *lifecycleWaiter) Wait(resources kube.ResourceList, timeout time.Duration) error {
+	return w.delegate.Wait(resources, timeout)
+}
+
+func (w *lifecycleWaiter) WaitWithJobs(resources kube.ResourceList, timeout time.Duration) error {
+	return w.delegate.WaitWithJobs(resources, timeout)
+}
+
+func (w *lifecycleWaiter) WaitForDelete(resources kube.ResourceList, timeout time.Duration) error {
 	filtered, err := filterRemoveRetained(resources)
 	if err != nil {
 		return err
 	}
-	return c.waitForDelete(filtered, timeout)
+	return w.delegate.WaitForDelete(filtered, timeout)
 }
 
-func (c *lifecycleKubeClient) waitForDelete(resources kube.ResourceList, timeout time.Duration) error {
-	if delegate, ok := c.Interface.(kube.InterfaceExt); ok {
-		return delegate.WaitForDelete(resources, timeout)
-	}
-	return errors.New("Kubernetes client does not support waiting for deletion")
-}
-
-func (c *lifecycleKubeClient) Delete(resources kube.ResourceList) (*kube.Result, []error) {
-	filtered, err := filterRemoveRetained(resources)
-	if err != nil {
-		return nil, []error{err}
-	}
-	return c.Interface.Delete(filtered)
-}
-
-func (c *lifecycleKubeClient) DeleteWithPropagationPolicy(resources kube.ResourceList, policy metav1.DeletionPropagation) (*kube.Result, []error) {
-	filtered, err := filterRemoveRetained(resources)
-	if err != nil {
-		return nil, []error{err}
-	}
-	if delegate, ok := c.Interface.(kube.InterfaceDeletionPropagation); ok {
-		return delegate.DeleteWithPropagationPolicy(filtered, policy)
-	}
-	return c.Interface.Delete(filtered)
+func (w *lifecycleWaiter) WatchUntilReady(resources kube.ResourceList, timeout time.Duration) error {
+	return w.delegate.WatchUntilReady(resources, timeout)
 }
 
 func filterRemoveRetained(resources kube.ResourceList) (kube.ResourceList, error) {
@@ -310,29 +316,16 @@ func filterRemoveRetained(resources kube.ResourceList) (kube.ResourceList, error
 	}), nil
 }
 
-// Keep optional kube interfaces available after wrapping the Helm client.
 func (c *lifecycleKubeClient) Get(resources kube.ResourceList, related bool) (map[string][]runtime.Object, error) {
-	delegate, ok := c.Interface.(kube.InterfaceResources)
-	if !ok {
-		return nil, errors.New("Kubernetes client does not support getting resources")
-	}
-	return delegate.Get(resources, related)
+	return c.Interface.Get(resources, related)
 }
 
 func (c *lifecycleKubeClient) BuildTable(reader io.Reader, validate bool) (kube.ResourceList, error) {
-	delegate, ok := c.Interface.(kube.InterfaceResources)
-	if !ok {
-		return nil, errors.New("Kubernetes client does not support building tables")
-	}
-	return delegate.BuildTable(reader, validate)
+	return c.Interface.BuildTable(reader, validate)
 }
 
 func (c *lifecycleKubeClient) GetPodList(namespace string, listOptions metav1.ListOptions) (*corev1.PodList, error) {
-	delegate, ok := c.Interface.(kube.InterfaceLogs)
-	if !ok {
-		return nil, errors.New("Kubernetes client does not support listing pods for logs")
-	}
-	return delegate.GetPodList(namespace, listOptions)
+	return c.Interface.GetPodList(namespace, listOptions)
 }
 
 func (c *lifecycleKubeClient) OutputContainerLogsForPodList(
@@ -340,19 +333,11 @@ func (c *lifecycleKubeClient) OutputContainerLogsForPodList(
 	namespace string,
 	writerFunc func(namespace, pod, container string) io.Writer,
 ) error {
-	delegate, ok := c.Interface.(kube.InterfaceLogs)
-	if !ok {
-		return errors.New("Kubernetes client does not support container logs")
-	}
-	return delegate.OutputContainerLogsForPodList(podList, namespace, writerFunc)
+	return c.Interface.OutputContainerLogsForPodList(podList, namespace, writerFunc)
 }
 
-// Assert the interfaces Helm discovers dynamically.
 var (
-	_ kube.Interface                    = (*lifecycleKubeClient)(nil)
-	_ kube.InterfaceExt                 = (*lifecycleKubeClient)(nil)
-	_ kube.InterfaceThreeWayMerge       = (*lifecycleKubeClient)(nil)
-	_ kube.InterfaceLogs                = (*lifecycleKubeClient)(nil)
-	_ kube.InterfaceDeletionPropagation = (*lifecycleKubeClient)(nil)
-	_ kube.InterfaceResources           = (*lifecycleKubeClient)(nil)
+	_ kube.Interface            = (*lifecycleKubeClient)(nil)
+	_ kube.InterfaceWaitOptions = (*lifecycleKubeClient)(nil)
+	_ kube.Waiter               = (*lifecycleWaiter)(nil)
 )

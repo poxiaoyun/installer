@@ -11,7 +11,7 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 - **Raw manifest extension**: append YAML or JSON Kubernetes objects through ordered `RawManifest` extensions; generated objects pass through the same namespace, identity, and pause enforcement
 - **Dependency management**: `spec.dependencies` gates execution of a new Instance generation; unmet prerequisites project `Waiting`, while later dependency health changes do not affect an already installed generation
 - **Values from external sources**: reference ConfigMap / Secret via `spec.valuesFrom`
-- **Immutable chart artifacts**: install Helm charts from a same-namespace immutable Secret with SHA-256 verification
+- **Immutable source artifacts**: install source data from a same-namespace immutable Secret with SHA-256 verification
 - **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; scale status reports the current non-terminal Pods selected by the instance label plus the optional `app.kubernetes.io/scale-pod-selector` annotation; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet
 - **Workload status tracking**: endpoints, states, and summary are computed from managed resources with CEL expressions supplied through `Instance` annotations
 - **Lifecycle strategies**: per-resource upgrade `Retain` / `Recreate` and remove `Retain`
@@ -44,11 +44,14 @@ spec:
       enabled: true
 ```
 
-The referenced Secret must be in the Instance namespace, have type
-`apps.xiaoshiai.cn/helm-chart.v1`, and set `immutable: true`. The digest in the
-Instance and the `apps.xiaoshiai.cn/content-digest` annotation are optional;
+The referenced Secret must be in the Instance namespace and set
+`immutable: true`; its Kubernetes Secret type is not restricted. The digest in
+the Instance and the `apps.xiaoshiai.cn/content-digest` annotation are optional;
 when present, each is verified against the selected Secret data. `secretRef.key`
-may select any non-empty data key.
+may select any non-empty data key. When both `artifact` and `url` are present,
+the Artifact source takes precedence and URL-related settings are ignored. The
+selected installer validates the data format; the Secret type itself does not
+imply a format. Use a descriptive key such as `chart.tgz` or `bundle.tgz`.
 
 Legacy URL-based sources remain supported:
 
@@ -67,6 +70,50 @@ spec:
       enabled: true
 EOF
 ```
+
+URL sources support bearer tokens and basic authentication. A bearer token
+takes precedence when both forms are configured:
+
+```yaml
+spec:
+  auth:
+    token: example-token
+```
+
+Credentials may also come from `auth.secretRef`. Opaque and BasicAuth Secrets
+use the `token`, `username`, and `password` keys; Docker config Secrets resolve
+registry/identity tokens or username and password for the source registry.
+
+TLS certificates are verified by default for every HTTPS URL source, including
+Git, archive, Helm repository, and OCI downloads. Add a private CA from a Secret when the source uses a
+certificate that is not trusted by the system roots:
+
+```yaml
+spec:
+  kind: helm
+  url: oci://registry.example.com/charts/my-chart
+  tls:
+    secretRef:
+      name: source-ca
+```
+
+The referenced Secret must be in the Instance namespace. It may contain
+`ca.crt` with CA certificates and, when client certificate authentication is
+required, both `tls.crt` and `tls.key`. A standard TLS Secret containing only
+`tls.crt` and `tls.key` is also accepted; when `ca.crt` is absent, `tls.crt` is
+trusted for that source. As a last resort, a trusted repository can explicitly
+disable certificate verification:
+
+```yaml
+spec:
+  kind: kustomize
+  url: https://source.example.com/app.tgz
+  tls:
+    insecureSkipVerify: true
+```
+
+Skipping certificate verification weakens transport security and should only be
+used when the source is otherwise trusted.
 
 Append additional resources with an ordered `RawManifest` extension:
 

@@ -7,8 +7,9 @@ keeps their observed runtime state on the `Instance` status.
 
 - An **Instance** is the desired installation: source, values, dependencies,
   extensions, lifecycle options, and instance-level replica count.
-- A **source** is either an immutable in-cluster chart artifact or a URL-backed
-  bundle. Artifacts are supported only for Helm instances.
+- A **source** is either an immutable in-cluster artifact or a URL-backed
+  bundle. The selected installer determines whether it can consume the source
+  content.
 - A **rendered resource** is a Kubernetes object produced from a source before
   platform invariants are applied.
 - A **managed resource** is a rendered resource successfully placed under the
@@ -52,7 +53,7 @@ One reconciliation follows this order:
    generation has not installed successfully. Dependencies are ordering
    prerequisites, not runtime health inputs, so their later state does not
    affect an installed dependent.
-3. Validate the source, resolve values and repository credentials, and create
+3. Validate the source, resolve values and source credentials, and create
    one `install.Instance` input.
 4. Build the common post-render pipeline.
 5. Skip execution only when the last successful execution still represents the
@@ -74,14 +75,68 @@ policy.
 ## Source and value resolution
 
 An artifact source references a Secret in the Instance namespace. The Secret
-must use the chart artifact type, be immutable, contain the selected non-empty
-data key, and hold a valid Helm archive. Supplied Instance and Secret annotation
-digests are independently checked against the archive. Verified bytes are
-exposed through a mode-`0600` temporary file and removed after use.
+type is unrestricted; it must be immutable and contain the selected non-empty
+data key. Supplied Instance and Secret annotation digests are independently
+checked against that data. Content validation belongs to the selected
+installer. Verified bytes are exposed through a mode-`0600` temporary file
+whose suffix preserves the data key and are removed after use.
 
-URL-backed sources may resolve a local path, Git repository, archive, or Helm
-repository. A versioned source may use the download cache; an unversioned source
-is fetched again so “latest” is not made stale by the cache.
+URL-backed sources may resolve a local path, Git repository, archive, HTTP chart
+repository, or OCI chart. `Downloader.Download` owns the singleflight boundary
+and computes the repository cache base for every source type. Each source
+implementation owns its cache filename and reuse policy. Exact HTTP chart
+versions and OCI digests can be served from cache without network access.
+Version ranges and latest requests refresh repository metadata, then reuse the
+resolved artifact when it is already cached.
+
+HTTP and OCI retrieval use the project-owned source transport. It clones Go's
+default HTTP transport, preserving environment proxy and connection behavior,
+then applies the resolved CA bundle, optional client certificate, and insecure
+verification setting. The source fetcher owns request context, user agent,
+Bearer or basic authentication, redirect credential scope, and HTTP status
+handling. OCI resolution and layer retrieval use go-containerregistry directly.
+Direct zip and tar downloads use the same fetcher. Git uses go-git's transport
+interface with the same resolved authentication and TLS material.
+
+Chart download, loading, and dependency handling remain functions because each
+invocation is an operation rather than a reusable domain object. Low-level
+`DownloadChart(ctx, destination, fsys, ChartOptions)` has no cache ownership:
+it resolves the source and writes to the supplied filesystem destination. The
+reusable `Downloader` owns the shared cache base and concurrent request
+coordination; the concrete source functions own cache behavior. The default
+dependency policy is strict: every chart must already contain its declared
+dependencies. Installer does not repair, build, update, or rewrite incomplete
+charts at runtime.
+
+## Helm 4 capability roadmap
+
+The Helm adapter currently exposes `timeout`, `maxHistory`, `disableHooks`,
+`wait`, `waitForJobs`, and `subNotes`. To preserve the pre-upgrade behavior,
+server-side apply remains disabled, `wait=false` uses Helm's hook-only strategy,
+and `wait=true` uses the Helm 3-compatible legacy strategy.
+
+Further Helm 4 features should be added as typed behavior even though Instance
+currently carries its installer options as name/value pairs:
+
+1. Reliability: `rollbackOnFailure`, upgrade `cleanupOnFail`, explicit
+   `waitStrategy` (`hookOnly`, `legacy`, or `watcher`), and uninstall
+   history/deletion propagation.
+2. Resource ownership: `serverSideApply` (`false`, `auto`, or `true`),
+   `forceConflicts`, and `takeOwnership`. These must be designed together with
+   Installer's per-resource Retain/Recreate lifecycle rules.
+3. Rendering and validation: Helm 4 post-render strategy (`combined`,
+   `separate`, or `nohooks`), schema/OpenAPI validation controls, DNS during
+   rendering, and notes controls.
+4. Supply-chain and transport: provenance verification and explicit
+   `passCredentialsAll` or OCI `plainHTTP` switches. The last two weaken
+   credential or transport boundaries and must never become implicit defaults.
+5. Chart API v3: use Helm's generic chart loader and generalize Installer's
+   chart/post-render/release interfaces, which are currently intentionally
+   pinned to chart API v2.
+
+Local Helm downloader plugins remain out of scope for the controller. New
+source protocols should be implemented as explicit project source adapters so
+their credentials, TLS, proxy, cancellation, and tests stay deterministic.
 
 Values are resolved in this order:
 

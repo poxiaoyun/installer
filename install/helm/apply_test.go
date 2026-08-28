@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"testing"
 
-	"helm.sh/helm/v3/pkg/chart"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
 	"xiaoshiai.cn/installer/install"
+	"xiaoshiai.cn/installer/install/filesystem"
+	"xiaoshiai.cn/installer/install/filesystem/osfs"
 )
 
 type appendTemplatePostRenderer struct{}
@@ -16,10 +18,11 @@ func (appendTemplatePostRenderer) Run(in *bytes.Buffer, _ *chart.Chart) (*bytes.
 }
 
 func TestTemplateRunsPostRenderer(t *testing.T) {
+	fsys := osfs.New()
 	rendered, err := New(nil).Template(t.Context(), install.Instance{
 		Name:         "template-test",
 		Namespace:    "default",
-		Location:     "../../testdata/helm-test",
+		Location:     filesystem.Location{FS: fsys, Path: "../../testdata/helm-test"},
 		Values:       map[string]any{"global": map[string]any{"replicas": 1, "paused": false}},
 		PostRenderer: appendTemplatePostRenderer{},
 	})

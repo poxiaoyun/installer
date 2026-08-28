@@ -7,7 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"os"
+	"path"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -39,55 +39,56 @@ func TestArtifactLoaderLoad(t *testing.T) {
 	}
 	loader := newTestArtifactLoader(t, secret)
 
-	path, actualDigest, cleanup, err := loader.Load(context.Background(), "default", artifact)
+	location, actualDigest, err := loader.Load(context.Background(), "default", artifact)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if actualDigest != digest {
 		t.Fatalf("Load() digest = %s, want %s", actualDigest, digest)
 	}
-	info, err := os.Stat(path)
+	info, err := location.FS.Stat(location.Path)
 	if err != nil {
-		t.Fatalf("stat temporary chart: %v", err)
+		t.Fatalf("stat in-memory chart: %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("temporary chart mode = %o, want 600", got)
+	if got := info.Mode().Perm(); got != 0o444 {
+		t.Fatalf("in-memory chart mode = %o, want 444", got)
 	}
-	got, err := os.ReadFile(path)
+	got, err := location.FS.ReadFile(location.Path)
 	if err != nil {
-		t.Fatalf("read temporary chart: %v", err)
+		t.Fatalf("read in-memory chart: %v", err)
 	}
 	if !bytes.Equal(got, archive) {
-		t.Fatal("temporary chart content does not match Secret data")
-	}
-	cleanup()
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("temporary chart still exists after cleanup: %v", err)
+		t.Fatal("in-memory chart content does not match Secret data")
 	}
 }
 
 func TestArtifactLoaderAllowsCustomKeyAndOptionalDigests(t *testing.T) {
-	archive := testChartArchive(t, "0.1.0", "value: one")
+	data := []byte("installer-specific artifact")
 	immutable := true
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
 		Immutable:  &immutable,
-		Type:       apps.ChartSecretType,
-		Data:       map[string][]byte{"custom.bundle": archive},
+		Type:       corev1.SecretTypeTLS,
+		Data:       map[string][]byte{"custom.bundle": data},
 	}
 	artifact := &appsv1.Artifact{
 		SecretRef: appsv1.ArtifactSecretRef{Name: secret.Name, Key: "custom.bundle"},
 	}
-	path, actualDigest, cleanup, err := newTestArtifactLoader(t, secret).Load(context.Background(), "default", artifact)
+	location, actualDigest, err := newTestArtifactLoader(t, secret).Load(context.Background(), "default", artifact)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	defer cleanup()
-	if path == "" {
+	if location.Path == "" {
 		t.Fatal("Load() returned an empty path")
 	}
-	if actualDigest != digestOf(archive) {
-		t.Fatalf("Load() digest = %s, want %s", actualDigest, digestOf(archive))
+	if actualDigest != digestOf(data) {
+		t.Fatalf("Load() digest = %s, want %s", actualDigest, digestOf(data))
+	}
+	if got, err := location.FS.ReadFile(location.Path); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("in-memory artifact = %q, %v", got, err)
+	}
+	if path.Ext(location.Path) != ".bundle" {
+		t.Fatalf("in-memory artifact path = %q, want key extension preserved", location.Path)
 	}
 }
 
@@ -121,7 +122,6 @@ func TestArtifactLoaderRejectsInvalidSources(t *testing.T) {
 		wantReason metav1.StatusReason
 	}{
 		{name: "missing Secret", withSecret: false, wantReason: ReasonArtifactSecretNotFound},
-		{name: "wrong Secret type", withSecret: true, mutate: func(_ *appsv1.Artifact, s *corev1.Secret) { s.Type = corev1.SecretTypeOpaque }, wantReason: ReasonArtifactSecretInvalid},
 		{name: "mutable Secret", withSecret: true, mutate: func(_ *appsv1.Artifact, s *corev1.Secret) { s.Immutable = nil }, wantReason: ReasonArtifactSecretInvalid},
 		{name: "missing data key", withSecret: true, mutate: func(_ *appsv1.Artifact, s *corev1.Secret) { s.Data = nil }, wantReason: ReasonArtifactSecretInvalid},
 		{name: "annotation digest mismatch", withSecret: true, mutate: func(_ *appsv1.Artifact, s *corev1.Secret) {
@@ -133,11 +133,6 @@ func TestArtifactLoaderRejectsInvalidSources(t *testing.T) {
 		}, wantReason: ReasonArtifactDigestMismatch},
 		{name: "unmatched digest", withSecret: true, mutate: func(a *appsv1.Artifact, _ *corev1.Secret) { a.Digest = "sha256:nope" }, wantReason: ReasonArtifactDigestMismatch},
 		{name: "empty key", withSecret: true, mutate: func(a *appsv1.Artifact, _ *corev1.Secret) { a.SecretRef.Key = "" }, wantReason: ReasonArtifactSecretInvalid},
-		{name: "invalid chart", withSecret: true, mutate: func(a *appsv1.Artifact, s *corev1.Secret) {
-			s.Data[apps.ChartSecretKey] = []byte("not a chart")
-			a.Digest = digestOf(s.Data[apps.ChartSecretKey])
-			s.Annotations[apps.ContentDigestAnnotation] = a.Digest
-		}, wantReason: ReasonArtifactLoadFailed},
 	}
 
 	for _, tt := range tests {
@@ -153,7 +148,7 @@ func TestArtifactLoaderRejectsInvalidSources(t *testing.T) {
 			} else {
 				loader = newTestArtifactLoader(t)
 			}
-			_, _, _, err := loader.Load(context.Background(), "default", artifact)
+			_, _, err := loader.Load(context.Background(), "default", artifact)
 			assertArtifactReason(t, err, tt.wantReason)
 		})
 	}
@@ -166,7 +161,7 @@ func newTestArtifactLoader(t *testing.T, objects ...runtime.Object) *ArtifactLoa
 		t.Fatalf("add core scheme: %v", err)
 	}
 	cli := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build()
-	return NewArtifactLoader(cli, t.TempDir())
+	return NewArtifactLoader(cli)
 }
 
 func assertArtifactReason(t *testing.T, err error, want metav1.StatusReason) {

@@ -6,7 +6,7 @@ import (
 	"io"
 	"maps"
 
-	"helm.sh/helm/v3/pkg/chart"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	kubeyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"

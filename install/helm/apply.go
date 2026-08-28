@@ -3,19 +3,12 @@ package helm
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"hash"
-	"sort"
 	"strconv"
 	"time"
 
 	"github.com/go-logr/logr"
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/release"
+	release "helm.sh/helm/v4/pkg/release/common"
 	"k8s.io/client-go/rest"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/install"
@@ -33,16 +26,20 @@ func New(config *rest.Config) *Apply {
 }
 
 func (r *Apply) Template(ctx context.Context, instance install.Instance) ([]byte, error) {
-	rendered, err := TemplateChart(ctx, instance.Name, instance.Namespace, instance.Location, instance.Values)
+	_, err := ParseOptions(instance.Options)
+	if err != nil {
+		return nil, fmt.Errorf("parse options: %w", err)
+	}
+	loadedChart, err := LoadChart(instance.Location)
+	if err != nil {
+		return nil, fmt.Errorf("load chart: %w", err)
+	}
+	rendered, err := templateChart(ctx, instance.Name, instance.Namespace, loadedChart, instance.Values)
 	if err != nil {
 		return nil, err
 	}
 	if instance.PostRenderer == nil {
 		return rendered, nil
-	}
-	loadedChart, err := loader.Load(instance.Location)
-	if err != nil {
-		return nil, fmt.Errorf("load chart for post-rendering: %w", err)
 	}
 	result, err := instance.PostRenderer.Run(bytes.NewBuffer(rendered), loadedChart)
 	if err != nil {
@@ -54,7 +51,7 @@ func (r *Apply) Template(ctx context.Context, instance install.Instance) ([]byte
 func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {
 	log := logr.FromContextOrDiscard(ctx)
 
-	log.Info("applying chart", "path", instance.Location)
+	log.Info("applying chart", "path", instance.Location.Path)
 
 	options, err := ParseOptions(instance.Options)
 	if err != nil {
@@ -62,15 +59,14 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 	}
 
 	// Load chart once for both ApplyChart and dashboard injection
-	loadedChart, err := loader.Load(instance.Location)
+	loadedChart, err := LoadChart(instance.Location)
 	if err != nil {
 		return nil, fmt.Errorf("load chart: %w", err)
 	}
 
 	helmPR := NewHelmPostRenderer(instance.PostRenderer, loadedChart)
-	desiredState := desiredReleaseState(loadedChart, install.PostRendererIdentity(instance.PostRenderer))
 
-	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, loadedChart, instance.Values, options, helmPR, desiredState)
+	applyedRelease, err := ApplyChart(ctx, r.Config, instance.Name, instance.Namespace, loadedChart, instance.Values, options, helmPR)
 	if err != nil {
 		return nil, err
 	}
@@ -80,58 +76,13 @@ func (r *Apply) Apply(ctx context.Context, instance install.Instance) (*install.
 	return &install.InstanceStatus{
 		Note:              applyedRelease.Info.Notes,
 		Namespace:         applyedRelease.Namespace,
-		CreationTimestamp: applyedRelease.Info.FirstDeployed.Time,
-		UpgradeTimestamp:  applyedRelease.Info.LastDeployed.Time,
+		CreationTimestamp: applyedRelease.Info.FirstDeployed,
+		UpgradeTimestamp:  applyedRelease.Info.LastDeployed,
 		Values:            applyedRelease.Config,
 		Version:           applyedRelease.Chart.Metadata.Version,
 		AppVersion:        applyedRelease.Chart.Metadata.AppVersion,
 		Resources:         ParseResourceReferences([]byte(applyedRelease.Manifest)),
 	}, nil
-}
-
-func desiredReleaseState(ch *chart.Chart, postRendererIdentity string) string {
-	h := sha256.New224()
-	writeChartState(h, ch)
-	writeStateBytes(h, []byte(postRendererIdentity))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func writeChartState(h hash.Hash, ch *chart.Chart) {
-	if ch == nil {
-		writeStateBytes(h, nil)
-		return
-	}
-	metadata, _ := json.Marshal(ch.Metadata)
-	lock, _ := json.Marshal(ch.Lock)
-	values, _ := json.Marshal(ch.Values)
-	writeStateBytes(h, metadata)
-	writeStateBytes(h, lock)
-	writeStateBytes(h, values)
-	writeStateBytes(h, ch.Schema)
-	writeChartFiles(h, ch.Templates)
-	writeChartFiles(h, ch.Files)
-
-	dependencies := append([]*chart.Chart(nil), ch.Dependencies()...)
-	sort.Slice(dependencies, func(i, j int) bool {
-		return dependencies[i].ChartFullPath() < dependencies[j].ChartFullPath()
-	})
-	for _, dependency := range dependencies {
-		writeChartState(h, dependency)
-	}
-}
-
-func writeChartFiles(h hash.Hash, files []*chart.File) {
-	files = append([]*chart.File(nil), files...)
-	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
-	for _, file := range files {
-		writeStateBytes(h, []byte(file.Name))
-		writeStateBytes(h, file.Data)
-	}
-}
-
-func writeStateBytes(h hash.Hash, data []byte) {
-	_, _ = fmt.Fprintf(h, "%d:", len(data))
-	_, _ = h.Write(data)
 }
 
 func ParseOptions(options []install.Option) (Options, error) {

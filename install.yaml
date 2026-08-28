@@ -68,22 +68,23 @@ spec:
             properties:
               artifact:
                 description: |-
-                  Artifact references a verified chart archive stored in a Secret in the
-                  same namespace as the Instance. Artifact and URL-based sources are
-                  mutually exclusive.
+                  Artifact references verified source data stored in a Secret in the
+                  same namespace as the Instance. Artifact takes precedence when URL is
+                  also configured.
                 properties:
                   digest:
                     description: |-
-                      Digest is the SHA-256 digest of the raw chart archive bytes.
+                      Digest is the SHA-256 digest of the selected raw Secret data.
                       When omitted, installer still computes and reports the actual digest.
                     type: string
                   secretRef:
-                    description: SecretRef identifies the chart archive in the Instance
+                    description: SecretRef identifies source data in the Instance
                       namespace.
                     properties:
                       key:
-                        description: Key is the Secret data key containing the chart
-                          archive.
+                        description: |-
+                          Key is the Secret data key containing the source. The key is used as the
+                          in-memory file path so the selected installer can interpret its suffix.
                         minLength: 1
                         type: string
                       name:
@@ -99,18 +100,18 @@ spec:
                 type: object
               auth:
                 description: |-
-                  Auth holds credentials for accessing the chart repository.
-                  Supports inline basic auth and secretRef for pulling from private repositories.
+                  Auth holds credentials for accessing the URL source.
+                  Supports inline bearer token or basic auth and secretRef for private sources.
                 properties:
                   password:
                     description: Password for basic authentication.
                     type: string
                   secretRef:
                     description: |-
-                      SecretRef references a Secret containing repository credentials.
+                      SecretRef references a Secret containing source credentials.
                       Supported Secret types:
-                        - Opaque / kubernetes.io/basic-auth: expects "username" and "password" keys
-                        - kubernetes.io/dockerconfigjson: parses ".dockerconfigjson" to match the repository host
+                        - Opaque / kubernetes.io/basic-auth: reads "token", "username", and "password" keys
+                        - kubernetes.io/dockerconfigjson: resolves token or basic credentials for the repository host
                     properties:
                       name:
                         default: ""
@@ -123,6 +124,11 @@ spec:
                         type: string
                     type: object
                     x-kubernetes-map-type: atomic
+                  token:
+                    description: |-
+                      Token for bearer authentication. When set, it takes precedence over
+                      username and password.
+                    type: string
                   username:
                     description: Username for basic authentication.
                     type: string
@@ -242,6 +248,39 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              tls:
+                description: |-
+                  TLS configures certificate verification for URL source downloads.
+                  Certificate verification is enabled by default.
+                properties:
+                  insecureSkipVerify:
+                    description: |-
+                      InsecureSkipVerify disables verification of the source server's TLS
+                      certificate. This should only be used for testing or with otherwise
+                      trusted sources whose certificates cannot be verified normally.
+                    type: boolean
+                  secretRef:
+                    description: |-
+                      SecretRef references a Secret in the Instance namespace. Supported keys:
+                        - "ca.crt" for PEM-encoded CA certificates
+                        - "tls.crt" and "tls.key" for an optional client certificate pair
+                          (when "ca.crt" is absent, "tls.crt" is also trusted as a source CA)
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                type: object
+                x-kubernetes-validations:
+                - message: tls secretRef name must not be empty
+                  rule: '!has(self.secretRef) || size(self.secretRef.name) > 0'
               url:
                 description: URL is the URL of helm repository, git clone url, tarball
                   url, s3 url, etc.
@@ -285,14 +324,6 @@ spec:
             x-kubernetes-validations:
             - message: either artifact or url must be specified
               rule: has(self.artifact) || (has(self.url) && size(self.url) > 0)
-            - message: artifact is only supported for helm instances
-              rule: '!has(self.artifact) || !has(self.kind) || self.kind == ''helm'''
-            - message: artifact cannot be combined with url, version, chart, path,
-                or auth
-              rule: '!has(self.artifact) || ((!has(self.url) || size(self.url) ==
-                0) && (!has(self.version) || size(self.version) == 0) && (!has(self.chart)
-                || size(self.chart) == 0) && (!has(self.path) || size(self.path) ==
-                0) && !has(self.auth))'
           status:
             properties:
               appVersion:

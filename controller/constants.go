@@ -18,6 +18,7 @@ const (
 	ReasonInvalidSource              = "InvalidSource"
 	ReasonResolveValuesFailed        = "ResolveValuesFailed"
 	ReasonResolveAuthFailed          = "ResolveAuthFailed"
+	ReasonResolveTLSFailed           = "ResolveTLSFailed"
 	ReasonInstalled                  = "Installed"
 	ReasonApplyFailed                = "ApplyFailed"
 )

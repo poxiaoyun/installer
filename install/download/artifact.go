@@ -1,44 +1,40 @@
 package download
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"os"
-	"path/filepath"
 
-	"helm.sh/helm/v3/pkg/chart/loader"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
+	"xiaoshiai.cn/installer/install/filesystem"
+	"xiaoshiai.cn/installer/install/filesystem/memoryfs"
 )
 
 const (
 	ReasonArtifactSecretNotFound = "ArtifactSecretNotFound"
 	ReasonArtifactSecretInvalid  = "ArtifactSecretInvalid"
 	ReasonArtifactDigestMismatch = "ArtifactDigestMismatch"
-	ReasonArtifactLoadFailed     = "ArtifactLoadFailed"
 )
 
-// ArtifactLoader verifies a chart Secret and exposes it as a temporary archive.
+// ArtifactLoader verifies a Secret-backed artifact and exposes its selected data
+// through a read-only in-memory filesystem.
 type ArtifactLoader struct {
-	Client   client.Client
-	CacheDir string
+	Client client.Client
 }
 
-func NewArtifactLoader(cli client.Client, cacheDir string) *ArtifactLoader {
-	return &ArtifactLoader{Client: cli, CacheDir: cacheDir}
+func NewArtifactLoader(cli client.Client) *ArtifactLoader {
+	return &ArtifactLoader{Client: cli}
 }
 
-// Load reads and verifies an artifact from the Instance namespace. The caller
-// must invoke the returned cleanup function after the chart consumer finishes.
-func (l *ArtifactLoader) Load(ctx context.Context, namespace string, artifact *appsv1.Artifact) (string, string, func(), error) {
+// Load reads and verifies an artifact from the Instance namespace.
+func (l *ArtifactLoader) Load(ctx context.Context, namespace string, artifact *appsv1.Artifact) (filesystem.Location, string, error) {
 	if err := validateArtifact(artifact); err != nil {
-		return "", "", func() {}, err
+		return filesystem.Location{}, "", err
 	}
 
 	secret := &corev1.Secret{}
@@ -48,60 +44,31 @@ func (l *ArtifactLoader) Load(ctx context.Context, namespace string, artifact *a
 		if apierrors.IsNotFound(err) {
 			reason = ReasonArtifactSecretNotFound
 		}
-		return "", "", func() {}, artifactError(reason, "get chart Secret %s/%s: %v", namespace, artifact.SecretRef.Name, err)
-	}
-	if secret.Type != apps.ChartSecretType {
-		return "", "", func() {}, artifactError(ReasonArtifactSecretInvalid, "chart Secret %s/%s has type %q, expected %q", namespace, secret.Name, secret.Type, apps.ChartSecretType)
+		return filesystem.Location{}, "", artifactError(reason, "get artifact Secret %s/%s: %v", namespace, artifact.SecretRef.Name, err)
 	}
 	if secret.Immutable == nil || !*secret.Immutable {
-		return "", "", func() {}, artifactError(ReasonArtifactSecretInvalid, "chart Secret %s/%s must be immutable", namespace, secret.Name)
+		return filesystem.Location{}, "", artifactError(ReasonArtifactSecretInvalid, "artifact Secret %s/%s must be immutable", namespace, secret.Name)
 	}
 
-	archive, ok := secret.Data[artifact.SecretRef.Key]
-	if !ok || len(archive) == 0 {
-		return "", "", func() {}, artifactError(ReasonArtifactSecretInvalid, "chart Secret %s/%s does not contain non-empty data key %q", namespace, secret.Name, artifact.SecretRef.Key)
+	data, ok := secret.Data[artifact.SecretRef.Key]
+	if !ok || len(data) == 0 {
+		return filesystem.Location{}, "", artifactError(ReasonArtifactSecretInvalid, "artifact Secret %s/%s does not contain non-empty data key %q", namespace, secret.Name, artifact.SecretRef.Key)
 	}
 	annotationDigest := secret.Annotations[apps.ContentDigestAnnotation]
-	actualDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(archive))
+	actualDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
 	if artifact.Digest != "" && actualDigest != artifact.Digest {
-		return "", "", func() {}, artifactError(ReasonArtifactDigestMismatch, "chart Secret %s/%s digest mismatch: expected %s, actual %s", namespace, secret.Name, artifact.Digest, actualDigest)
+		return filesystem.Location{}, "", artifactError(ReasonArtifactDigestMismatch, "artifact Secret %s/%s digest mismatch: expected %s, actual %s", namespace, secret.Name, artifact.Digest, actualDigest)
 	}
 	if annotationDigest != "" && actualDigest != annotationDigest {
-		return "", "", func() {}, artifactError(ReasonArtifactDigestMismatch, "chart Secret %s/%s annotation digest mismatch: expected %s, actual %s", namespace, secret.Name, annotationDigest, actualDigest)
-	}
-	if _, err := loader.LoadArchive(bytes.NewReader(archive)); err != nil {
-		return "", "", func() {}, artifactError(ReasonArtifactLoadFailed, "load chart from Secret %s/%s: %v", namespace, secret.Name, err)
+		return filesystem.Location{}, "", artifactError(ReasonArtifactDigestMismatch, "artifact Secret %s/%s annotation digest mismatch: expected %s, actual %s", namespace, secret.Name, annotationDigest, actualDigest)
 	}
 
-	dir := l.CacheDir
-	if dir == "" {
-		dir = os.TempDir()
-	}
-	dir = filepath.Join(dir, "artifacts")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", "", func() {}, artifactError(ReasonArtifactLoadFailed, "create artifact temporary directory: %v", err)
-	}
-	f, err := os.CreateTemp(dir, "chart-*.tgz")
-	if err != nil {
-		return "", "", func() {}, artifactError(ReasonArtifactLoadFailed, "create artifact temporary file: %v", err)
-	}
-	path := f.Name()
-	cleanup := func() { _ = os.Remove(path) }
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		cleanup()
-		return "", "", func() {}, artifactError(ReasonArtifactLoadFailed, "secure artifact temporary file: %v", err)
-	}
-	if _, err := f.Write(archive); err != nil {
-		_ = f.Close()
-		cleanup()
-		return "", "", func() {}, artifactError(ReasonArtifactLoadFailed, "write artifact temporary file: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		cleanup()
-		return "", "", func() {}, artifactError(ReasonArtifactLoadFailed, "close artifact temporary file: %v", err)
-	}
-	return path, actualDigest, cleanup, nil
+	return filesystem.Location{
+		FS: memoryfs.New(map[string]memoryfs.File{
+			artifact.SecretRef.Key: {Data: data, Mode: 0o444},
+		}),
+		Path: artifact.SecretRef.Key,
+	}, actualDigest, nil
 }
 
 func validateArtifact(artifact *appsv1.Artifact) error {

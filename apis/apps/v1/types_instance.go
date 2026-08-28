@@ -34,8 +34,6 @@ type InstanceList struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.artifact) || (has(self.url) && size(self.url) > 0)",message="either artifact or url must be specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.artifact) || !has(self.kind) || self.kind == 'helm'",message="artifact is only supported for helm instances"
-// +kubebuilder:validation:XValidation:rule="!has(self.artifact) || ((!has(self.url) || size(self.url) == 0) && (!has(self.version) || size(self.version) == 0) && (!has(self.chart) || size(self.chart) == 0) && (!has(self.path) || size(self.path) == 0) && !has(self.auth))",message="artifact cannot be combined with url, version, chart, path, or auth"
 type InstanceSpec struct {
 	// Replicas is the instance-level desired replica count. Installer injects
 	// this value into values.global.replicas. Pause state remains independently
@@ -48,9 +46,9 @@ type InstanceSpec struct {
 	// +kubebuilder:default=helm
 	Kind InstanceKind `json:"kind,omitempty"`
 
-	// Artifact references a verified chart archive stored in a Secret in the
-	// same namespace as the Instance. Artifact and URL-based sources are
-	// mutually exclusive.
+	// Artifact references verified source data stored in a Secret in the
+	// same namespace as the Instance. Artifact takes precedence when URL is
+	// also configured.
 	// +kubebuilder:validation:Optional
 	Artifact *Artifact `json:"artifact,omitempty"`
 
@@ -91,49 +89,75 @@ type InstanceSpec struct {
 	// +kubebuilder:validation:Optional
 	Extensions []Extension `json:"extensions,omitempty"`
 
-	// Auth holds credentials for accessing the chart repository.
-	// Supports inline basic auth and secretRef for pulling from private repositories.
+	// TLS configures certificate verification for URL source downloads.
+	// Certificate verification is enabled by default.
+	// +kubebuilder:validation:Optional
+	TLS *RepositoryTLS `json:"tls,omitempty"`
+
+	// Auth holds credentials for accessing the URL source.
+	// Supports inline bearer token or basic auth and secretRef for private sources.
 	// +kubebuilder:validation:Optional
 	Auth *RepositoryAuth `json:"auth,omitempty"`
 }
 
-// Artifact describes an immutable chart source stored in a Secret.
+// Artifact describes immutable source data stored in a Secret.
 type Artifact struct {
-	// SecretRef identifies the chart archive in the Instance namespace.
+	// SecretRef identifies source data in the Instance namespace.
 	SecretRef ArtifactSecretRef `json:"secretRef"`
 
-	// Digest is the SHA-256 digest of the raw chart archive bytes.
+	// Digest is the SHA-256 digest of the selected raw Secret data.
 	// When omitted, installer still computes and reports the actual digest.
 	// +kubebuilder:validation:Optional
 	Digest string `json:"digest,omitempty"`
 }
 
-// ArtifactSecretRef references a chart archive in a Kubernetes Secret.
+// ArtifactSecretRef references source data in a Kubernetes Secret.
 type ArtifactSecretRef struct {
 	// Name is the Secret name in the Instance namespace.
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// Key is the Secret data key containing the chart archive.
+	// Key is the Secret data key containing the source. The key is used as the
+	// in-memory file path so the selected installer can interpret its suffix.
 	// +kubebuilder:validation:MinLength=1
 	Key string `json:"key"`
 }
 
-// RepositoryAuth configures authentication for the chart repository.
+// RepositoryAuth configures authentication for a URL source.
 // Inline credentials take precedence over those resolved from SecretRef.
 type RepositoryAuth struct {
+	// Token for bearer authentication. When set, it takes precedence over
+	// username and password.
+	// +kubebuilder:validation:Optional
+	Token string `json:"token,omitempty"`
 	// Username for basic authentication.
 	// +kubebuilder:validation:Optional
 	Username string `json:"username,omitempty"`
 	// Password for basic authentication.
 	// +kubebuilder:validation:Optional
 	Password string `json:"password,omitempty"`
-	// SecretRef references a Secret containing repository credentials.
+	// SecretRef references a Secret containing source credentials.
 	// Supported Secret types:
-	//   - Opaque / kubernetes.io/basic-auth: expects "username" and "password" keys
-	//   - kubernetes.io/dockerconfigjson: parses ".dockerconfigjson" to match the repository host
+	//   - Opaque / kubernetes.io/basic-auth: reads "token", "username", and "password" keys
+	//   - kubernetes.io/dockerconfigjson: resolves token or basic credentials for the repository host
 	// +kubebuilder:validation:Optional
 	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
+}
+
+// RepositoryTLS configures TLS verification for URL source downloads.
+// +kubebuilder:validation:XValidation:rule="!has(self.secretRef) || size(self.secretRef.name) > 0",message="tls secretRef name must not be empty"
+type RepositoryTLS struct {
+	// SecretRef references a Secret in the Instance namespace. Supported keys:
+	//   - "ca.crt" for PEM-encoded CA certificates
+	//   - "tls.crt" and "tls.key" for an optional client certificate pair
+	//     (when "ca.crt" is absent, "tls.crt" is also trusted as a source CA)
+	// +kubebuilder:validation:Optional
+	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
+
+	// InsecureSkipVerify disables verification of the source server's TLS
+	// certificate. This should only be used for testing or with otherwise
+	// trusted sources whose certificates cannot be verified normally.
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 type Option struct {

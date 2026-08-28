@@ -10,9 +10,11 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v4/pkg/action"
+	chartcommon "helm.sh/helm/v4/pkg/chart/common"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
+	releasecommon "helm.sh/helm/v4/pkg/release/common"
+	release "helm.sh/helm/v4/pkg/release/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -21,7 +23,8 @@ import (
 	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/install"
-	"xiaoshiai.cn/installer/install/download"
+	"xiaoshiai.cn/installer/install/filesystem"
+	"xiaoshiai.cn/installer/install/filesystem/osfs"
 	installerhelm "xiaoshiai.cn/installer/install/helm"
 )
 
@@ -39,15 +42,15 @@ var _ = Describe("Chart Secret artifacts", func() {
 			Chart:     loadedChart,
 			Config:    values,
 			Info: &release.Info{
-				Status:      release.StatusPendingInstall,
+				Status:      releasecommon.StatusPendingInstall,
 				Description: "simulated interrupted install",
 			},
 			Version: 1,
 		})).To(Succeed())
 
-		result, err := installerhelm.ApplyChart(ctx, cfg, name, namespace, loadedChart, values, installerhelm.Options{}, nil, "pending-install-recovery")
+		result, err := installerhelm.ApplyChart(ctx, cfg, name, namespace, loadedChart, values, installerhelm.Options{}, nil)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(result.Info.Status).To(Equal(release.StatusDeployed))
+		Expect(result.Info.Status).To(Equal(releasecommon.StatusDeployed))
 		DeferCleanup(func() {
 			_, err := installerhelm.RemoveChart(ctx, cfg, name, namespace, installerhelm.Options{})
 			Expect(err).NotTo(HaveOccurred())
@@ -56,11 +59,12 @@ var _ = Describe("Chart Secret artifacts", func() {
 
 	It("recovers a Helm upgrade interrupted after creating its pending release", func() {
 		const namespace = "default"
+		fsys := osfs.New()
 		instance := install.Instance{
 			Name:      "pending-upgrade-recovery",
 			Namespace: namespace,
 			Kind:      appsv1.InstanceKindHelm,
-			Location:  testhelmdir,
+			Location:  filesystem.Location{FS: fsys, Path: testhelmdir},
 			Values: map[string]any{
 				"global": map[string]any{"replicas": 1, "paused": false},
 			},
@@ -72,14 +76,15 @@ var _ = Describe("Chart Secret artifacts", func() {
 
 		helmConfig, err := installerhelm.NewHelmConfig(ctx, namespace, cfg)
 		Expect(err).NotTo(HaveOccurred())
-		current, err := action.NewGet(helmConfig).Run(instance.Name)
+		currentValue, err := action.NewGet(helmConfig).Run(instance.Name)
 		Expect(err).NotTo(HaveOccurred())
+		current := mustV1Release(currentValue)
 		pending := *current
 		pending.Version = current.Version + 1
 		pending.Info = &release.Info{
 			FirstDeployed: current.Info.FirstDeployed,
 			LastDeployed:  current.Info.LastDeployed,
-			Status:        release.StatusPendingUpgrade,
+			Status:        releasecommon.StatusPendingUpgrade,
 			Description:   "simulated interrupted upgrade",
 		}
 		Expect(helmConfig.Releases.Create(&pending)).To(Succeed())
@@ -105,7 +110,6 @@ var _ = Describe("Chart Secret artifacts", func() {
 			values,
 			installerhelm.Options{},
 			nil,
-			"initial-render-failure",
 		)
 		Expect(err).To(MatchError(ContainSubstring("simulated initial render failure")))
 
@@ -123,7 +127,6 @@ var _ = Describe("Chart Secret artifacts", func() {
 			values,
 			installerhelm.Options{},
 			nil,
-			"initial-render-recovered",
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.Version).To(Equal(1))
@@ -146,7 +149,6 @@ var _ = Describe("Chart Secret artifacts", func() {
 			initialValues,
 			installerhelm.Options{},
 			nil,
-			"upgrade-render-initial",
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(initial.Version).To(Equal(1))
@@ -165,16 +167,16 @@ var _ = Describe("Chart Secret artifacts", func() {
 			updatedValues,
 			installerhelm.Options{},
 			nil,
-			"upgrade-render-failure",
 		)
 		Expect(err).To(MatchError(ContainSubstring("simulated upgrade render failure")))
 
 		helmConfig, err := installerhelm.NewHelmConfig(ctx, namespace, cfg)
 		Expect(err).NotTo(HaveOccurred())
-		current, err := action.NewGet(helmConfig).Run(name)
+		currentValue, err := action.NewGet(helmConfig).Run(name)
 		Expect(err).NotTo(HaveOccurred())
+		current := mustV1Release(currentValue)
 		Expect(current.Version).To(Equal(1))
-		Expect(current.Info.Status).To(Equal(release.StatusDeployed))
+		Expect(current.Info.Status).To(Equal(releasecommon.StatusDeployed))
 
 		updated, err := installerhelm.ApplyChart(
 			ctx,
@@ -185,7 +187,6 @@ var _ = Describe("Chart Secret artifacts", func() {
 			updatedValues,
 			installerhelm.Options{},
 			nil,
-			"upgrade-render-recovered",
 		)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(updated.Version).To(Equal(2))
@@ -218,24 +219,6 @@ var _ = Describe("Chart Secret artifacts", func() {
 		releaseV1 := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sh.helm.release.v1.artifact-demo.v1", Namespace: namespace}}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(releaseV1), releaseV1)).To(Succeed())
 
-		// Simulate Helm succeeding while the Instance status was not persisted.
-		// The retry must recover from the Helm release without creating revision 2.
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
-		instance.Status.ObservedGeneration = 0
-		meta.SetStatusCondition(&instance.Status.Conditions, metav1.Condition{
-			Type:    appsv1.ConditionInstalled,
-			Status:  metav1.ConditionFalse,
-			Reason:  "SimulatedStatusWriteFailure",
-			Message: "simulate a retry after Helm completed",
-		})
-		Expect(k8sClient.Status().Update(ctx, instance)).To(Succeed())
-		eventuallyInstalledArtifact(instance, digestV1, "0.1.0")
-		unexpectedReleaseV2 := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sh.helm.release.v1.artifact-demo.v2", Namespace: namespace}}
-		Consistently(func() bool {
-			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(unexpectedReleaseV2), unexpectedReleaseV2)
-			return apierrors.IsNotFound(err)
-		}, 2*time.Second, 100*time.Millisecond).Should(BeTrue())
-
 		invalidArchive := []byte("not a Helm chart")
 		invalidDigest := controllerTestDigest(invalidArchive)
 		invalidSecret := controllerChartSecret(namespace, "artifact-demo-invalid", invalidArchive, invalidDigest)
@@ -254,7 +237,7 @@ var _ = Describe("Chart Secret artifacts", func() {
 			return instance.Status.Phase == appsv1.PhaseFailed &&
 				instance.Status.Artifact != nil &&
 				instance.Status.Artifact.Digest == digestV1 &&
-				condition != nil && condition.Reason == download.ReasonArtifactLoadFailed
+				condition != nil && condition.Reason == "ApplyFailed"
 		}, 30*time.Second, 500*time.Millisecond).Should(BeTrue())
 
 		// Content changes must upgrade even when Chart.yaml version and Helm
@@ -263,12 +246,16 @@ var _ = Describe("Chart Secret artifacts", func() {
 		digestV2 := controllerTestDigest(archiveV2)
 		secretV2 := controllerChartSecret(namespace, "artifact-demo-0.2.0", archiveV2, digestV2)
 		Expect(k8sClient.Create(ctx, secretV2)).To(Succeed())
-		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)).To(Succeed())
-		instance.Spec.Artifact = &appsv1.Artifact{
-			SecretRef: appsv1.ArtifactSecretRef{Name: secretV2.Name, Key: apps.ChartSecretKey},
-			Digest:    digestV2,
-		}
-		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance); err != nil {
+				return err
+			}
+			instance.Spec.Artifact = &appsv1.Artifact{
+				SecretRef: appsv1.ArtifactSecretRef{Name: secretV2.Name, Key: apps.ChartSecretKey},
+				Digest:    digestV2,
+			}
+			return k8sClient.Update(ctx, instance)
+		}, 10*time.Second, 100*time.Millisecond).Should(Succeed())
 		eventuallyInstalledArtifact(instance, digestV2, "0.1.0")
 
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cm), cm)).To(Succeed())
@@ -323,7 +310,7 @@ var _ = Describe("Chart Secret artifacts", func() {
 		Eventually(func() string {
 			_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(instance), instance)
 			return instance.Status.Message
-		}, 30*time.Second, 500*time.Millisecond).Should(ContainSubstring("get chart Secret"))
+		}, 30*time.Second, 500*time.Millisecond).Should(ContainSubstring("get artifact Secret"))
 
 		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 		eventuallyInstalledArtifact(instance, digest, "0.1.0")
@@ -348,11 +335,17 @@ func recoveryChart(version, manifest string) *chart.Chart {
 	return &chart.Chart{
 		Metadata: &chart.Metadata{APIVersion: "v2", Name: "recovery-test", Version: version},
 		Values:   map[string]any{"value": "default"},
-		Templates: []*chart.File{{
+		Templates: []*chartcommon.File{{
 			Name: "templates/configmap.yaml",
 			Data: []byte(manifest),
 		}},
 	}
+}
+
+func mustV1Release(value any) *release.Release {
+	result, ok := value.(*release.Release)
+	Expect(ok).To(BeTrue(), "unexpected Helm release type %T", value)
+	return result
 }
 
 func eventuallyInstalledArtifact(instance *appsv1.Instance, digest, version string) {

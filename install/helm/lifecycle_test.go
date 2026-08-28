@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"helm.sh/helm/v3/pkg/kube"
+	"helm.sh/helm/v4/pkg/kube"
 	corev1 "k8s.io/api/core/v1"
 	meta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,32 +73,26 @@ type recordingHelmClient struct {
 	deletes         kube.ResourceList
 	waitsForDeletes kube.ResourceList
 	deletePolicy    metav1.DeletionPropagation
-	threeWayUpdates int
+	updateOptions   int
 	logPodList      *corev1.PodList
 	logNamespace    string
 	logWrites       int
 }
 
-func (c *recordingHelmClient) Update(original, target kube.ResourceList, _ bool) (*kube.Result, error) {
+func (c *recordingHelmClient) Update(original, target kube.ResourceList, options ...kube.ClientUpdateOption) (*kube.Result, error) {
 	c.updates++
+	c.updateOptions = len(options)
 	c.updateOriginal = append(kube.ResourceList{}, original...)
 	c.updateTarget = append(kube.ResourceList{}, target...)
 	return &kube.Result{Updated: target}, nil
 }
 
-func (c *recordingHelmClient) UpdateThreeWayMerge(original, target kube.ResourceList, _ bool) (*kube.Result, error) {
-	c.threeWayUpdates++
-	c.updateOriginal = append(kube.ResourceList{}, original...)
-	c.updateTarget = append(kube.ResourceList{}, target...)
-	return &kube.Result{Updated: target}, nil
-}
-
-func (c *recordingHelmClient) Create(resources kube.ResourceList) (*kube.Result, error) {
+func (c *recordingHelmClient) Create(resources kube.ResourceList, _ ...kube.ClientCreateOption) (*kube.Result, error) {
 	c.creates = append(c.creates, resources...)
 	return &kube.Result{Created: resources}, nil
 }
 
-func (c *recordingHelmClient) DeleteWithPropagationPolicy(resources kube.ResourceList, policy metav1.DeletionPropagation) (*kube.Result, []error) {
+func (c *recordingHelmClient) Delete(resources kube.ResourceList, policy metav1.DeletionPropagation) (*kube.Result, []error) {
 	c.deletes = append(c.deletes, resources...)
 	c.deletePolicy = policy
 	return &kube.Result{Deleted: resources}, nil
@@ -106,6 +100,22 @@ func (c *recordingHelmClient) DeleteWithPropagationPolicy(resources kube.Resourc
 
 func (c *recordingHelmClient) WaitForDelete(resources kube.ResourceList, _ time.Duration) error {
 	c.waitsForDeletes = append(c.waitsForDeletes, resources...)
+	return nil
+}
+
+func (c *recordingHelmClient) GetWaiter(kube.WaitStrategy) (kube.Waiter, error) {
+	return c, nil
+}
+
+func (c *recordingHelmClient) Wait(kube.ResourceList, time.Duration) error {
+	return nil
+}
+
+func (c *recordingHelmClient) WaitWithJobs(kube.ResourceList, time.Duration) error {
+	return nil
+}
+
+func (c *recordingHelmClient) WatchUntilReady(kube.ResourceList, time.Duration) error {
 	return nil
 }
 
@@ -177,7 +187,7 @@ func TestLifecycleKubeClientUpdateStrategies(t *testing.T) {
 		helmResource("unchanged", "same", install.UpgradeStrategyRecreate),
 	}
 
-	result, err := client.Update(original, target, false)
+	result, err := client.Update(original, target)
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
@@ -209,7 +219,7 @@ func TestLifecycleKubeClientValidatesBeforeUpdate(t *testing.T) {
 	client := newLifecycleKubeClient(delegate)
 	target := kube.ResourceList{helmResource("invalid", "new", "Replace")}
 
-	if _, err := client.Update(nil, target, false); err == nil {
+	if _, err := client.Update(nil, target); err == nil {
 		t.Fatal("Update() error = nil, want invalid strategy error")
 	}
 	if delegate.updates != 0 || len(delegate.creates) != 0 || len(delegate.deletes) != 0 {
@@ -230,7 +240,7 @@ func TestLifecycleKubeClientUsesLiveObjectWhenLeavingRetain(t *testing.T) {
 		return liveOriginal, nil
 	}
 
-	if _, err := client.Update(kube.ResourceList{releaseOriginal}, kube.ResourceList{target}, false); err != nil {
+	if _, err := client.Update(kube.ResourceList{releaseOriginal}, kube.ResourceList{target}); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
 	if len(delegate.updateOriginal) != 1 || delegate.updateOriginal[0] != liveOriginal {
@@ -241,7 +251,7 @@ func TestLifecycleKubeClientUsesLiveObjectWhenLeavingRetain(t *testing.T) {
 	}
 }
 
-func TestLifecycleKubeClientPreservesThreeWayMergeAndLogs(t *testing.T) {
+func TestLifecycleKubeClientPreservesUpdateOptionsAndLogs(t *testing.T) {
 	delegate := &recordingHelmClient{logPodList: &corev1.PodList{
 		Items: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "hook"}}},
 	}}
@@ -257,11 +267,11 @@ func TestLifecycleKubeClientPreservesThreeWayMergeAndLogs(t *testing.T) {
 		helmResource("recreated", "new", install.UpgradeStrategyRecreate),
 	}
 
-	if _, err := client.UpdateThreeWayMerge(original, target, false); err != nil {
-		t.Fatalf("UpdateThreeWayMerge() error = %v", err)
+	if _, err := client.Update(original, target, kube.ClientUpdateOptionThreeWayMergeForUnstructured(true)); err != nil {
+		t.Fatalf("Update() error = %v", err)
 	}
-	if delegate.threeWayUpdates != 1 || delegate.updates != 0 {
-		t.Fatalf("three-way updates = %d, ordinary updates = %d", delegate.threeWayUpdates, delegate.updates)
+	if delegate.updates != 1 || delegate.updateOptions != 1 {
+		t.Fatalf("updates = %d, options = %d", delegate.updates, delegate.updateOptions)
 	}
 	if got := resourceNames(delegate.updateTarget); len(got) != 1 || got[0] != "normal" {
 		t.Fatalf("three-way update target = %v, want [normal]", got)
@@ -297,7 +307,7 @@ func TestLifecycleKubeClientRetainsRemovedResources(t *testing.T) {
 	})
 	ordinary := helmResource("ordinary", "old", "")
 
-	if _, err := client.Update(kube.ResourceList{retained, ordinary}, nil, false); err != nil {
+	if _, err := client.Update(kube.ResourceList{retained, ordinary}, nil); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
 	if got := resourceNames(delegate.updateOriginal); len(got) != 1 || got[0] != "ordinary" {
@@ -305,8 +315,8 @@ func TestLifecycleKubeClientRetainsRemovedResources(t *testing.T) {
 	}
 
 	delegate.deletes = nil
-	if _, errs := client.DeleteWithPropagationPolicy(kube.ResourceList{retained, ordinary}, metav1.DeletePropagationBackground); len(errs) != 0 {
-		t.Fatalf("DeleteWithPropagationPolicy() errors = %v", errs)
+	if _, errs := client.Delete(kube.ResourceList{retained, ordinary}, metav1.DeletePropagationBackground); len(errs) != 0 {
+		t.Fatalf("Delete() errors = %v", errs)
 	}
 	if got := resourceNames(delegate.deletes); len(got) != 1 || got[0] != "ordinary" {
 		t.Fatalf("uninstall deletes = %v, want [ordinary]", got)

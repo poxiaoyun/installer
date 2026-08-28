@@ -2,10 +2,8 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -14,7 +12,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	"helm.sh/helm/v3/pkg/strvals"
+	"helm.sh/helm/v4/pkg/strvals"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -264,8 +262,8 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// sync
 	err := r.Sync(ctx, instance)
-	if ctx.Err() != nil {
-		return ctrl.Result{}, ctx.Err()
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ctrl.Result{}, err
 	}
 	if err != nil {
 		instance.Status.Phase = appsv1.PhaseFailed
@@ -339,7 +337,12 @@ func (r *InstanceReconciler) syncInstall(ctx context.Context, instance *appsv1.I
 		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, ReasonResolveAuthFailed, err.Error())
 		return err
 	}
-	instanceSpec := installerInstanceFrom(instance, values, auth)
+	tlsConfig, err := r.resolveTLS(ctx, instance)
+	if err != nil {
+		r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, ReasonResolveTLSFailed, err.Error())
+		return err
+	}
+	instanceSpec := installerInstanceFrom(instance, values, auth, tlsConfig)
 
 	// Build PostRenderer pipeline
 	instanceSpec.PostRenderer = r.buildPostRenderer(ctx, instance, values)
@@ -392,7 +395,7 @@ func (r *InstanceReconciler) setCondition(instance *appsv1.Instance, conditionTy
 	})
 }
 
-func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, auth *install.ResolvedAuth) install.Instance {
+func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, auth *install.ResolvedAuth, tlsConfig *install.ResolvedTLS) install.Instance {
 	return install.Instance{
 		Name:              instance.Name,
 		Namespace:         instance.Namespace,
@@ -408,6 +411,7 @@ func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, aut
 		UpgradeTimestamp:  instance.Status.UpgradeTimestamp.Time,
 		Options:           instance.Spec.Options,
 		Auth:              auth,
+		TLS:               tlsConfig,
 	}
 }
 
@@ -441,17 +445,11 @@ func isCurrentGenerationInstalled(instance *appsv1.Instance) bool {
 
 func validateInstanceSource(instance *appsv1.Instance) error {
 	artifact := instance.Spec.Artifact
-	if artifact == nil {
-		if instance.Spec.URL == "" {
-			return fmt.Errorf("either artifact or url must be specified")
-		}
+	if artifact != nil {
 		return nil
 	}
-	if instance.Spec.Kind != "" && instance.Spec.Kind != appsv1.InstanceKindHelm {
-		return fmt.Errorf("artifact is only supported for helm instances")
-	}
-	if instance.Spec.URL != "" || instance.Spec.Version != "" || instance.Spec.Chart != "" || instance.Spec.Path != "" || instance.Spec.Auth != nil {
-		return fmt.Errorf("artifact cannot be combined with url, version, chart, path, or auth")
+	if instance.Spec.URL == "" {
+		return fmt.Errorf("either artifact or url must be specified")
 	}
 	return nil
 }
@@ -501,22 +499,7 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 		postrender.DashboardPostRenderer{Name: instance.Name, Namespace: instance.Namespace},
 		postrender.CompositeRenderer{Modifiers: modifiers},
 	}
-	return install.WithPostRendererIdentity(chain, postRendererIdentity(instance.Spec.Extensions, allowClusterScoped))
-}
-
-func postRendererIdentity(extensions []appsv1.Extension, allowClusterScoped bool) string {
-	state := struct {
-		Version            int                `json:"version"`
-		Extensions         []appsv1.Extension `json:"extensions,omitempty"`
-		AllowClusterScoped bool               `json:"allowClusterScoped"`
-	}{
-		Version:            3,
-		Extensions:         extensions,
-		AllowClusterScoped: allowClusterScoped,
-	}
-	data, _ := json.Marshal(state)
-	digest := sha256.Sum256(data)
-	return hex.EncodeToString(digest[:])
+	return chain
 }
 
 // getGlobalReplicas reads the installer-injected global.replicas value.
@@ -735,14 +718,15 @@ func desiredInstanceReplicas(instance *appsv1.Instance) int32 {
 	return *instance.Spec.Replicas
 }
 
-// resolveAuth resolves repository credentials from the Instance spec.
+// resolveAuth resolves URL source credentials from the Instance spec.
 // It reads inline credentials and/or a referenced Secret, with inline fields taking precedence.
 func (r *InstanceReconciler) resolveAuth(ctx context.Context, instance *appsv1.Instance) (*install.ResolvedAuth, error) {
-	if instance.Spec.Auth == nil {
+	if instance.Spec.Auth == nil || instance.Spec.Artifact != nil {
 		return nil, nil
 	}
 	auth := instance.Spec.Auth
 	resolved := &install.ResolvedAuth{
+		Token:    auth.Token,
 		Username: auth.Username,
 		Password: auth.Password,
 	}
@@ -755,6 +739,9 @@ func (r *InstanceReconciler) resolveAuth(ctx context.Context, instance *appsv1.I
 		}
 		switch secret.Type {
 		case corev1.SecretTypeOpaque, corev1.SecretTypeBasicAuth:
+			if resolved.Token == "" {
+				resolved.Token = string(secret.Data["token"])
+			}
 			if resolved.Username == "" {
 				resolved.Username = string(secret.Data["username"])
 			}
@@ -762,24 +749,66 @@ func (r *InstanceReconciler) resolveAuth(ctx context.Context, instance *appsv1.I
 				resolved.Password = string(secret.Data["password"])
 			}
 		case corev1.SecretTypeDockerConfigJson:
-			u, p, err := extractDockerAuth(secret.Data[corev1.DockerConfigJsonKey], instance.Spec.URL)
+			dockerAuth, err := extractDockerAuth(secret.Data[corev1.DockerConfigJsonKey], instance.Spec.URL)
 			if err != nil {
 				return nil, fmt.Errorf("parse dockerconfigjson from secret %q: %w", auth.SecretRef.Name, err)
 			}
+			if resolved.Token == "" {
+				resolved.Token = dockerAuth.Token
+			}
 			if resolved.Username == "" {
-				resolved.Username = u
+				resolved.Username = dockerAuth.Username
 			}
 			if resolved.Password == "" {
-				resolved.Password = p
+				resolved.Password = dockerAuth.Password
 			}
 		default:
 			return nil, fmt.Errorf("unsupported secret type %q for auth secret %q", secret.Type, auth.SecretRef.Name)
 		}
 	}
 
-	if resolved.Username == "" && resolved.Password == "" {
+	if resolved.Token == "" && resolved.Username == "" && resolved.Password == "" {
 		return nil, nil
 	}
+	return resolved, nil
+}
+
+// resolveTLS resolves URL source TLS settings and certificates from the Instance spec.
+func (r *InstanceReconciler) resolveTLS(ctx context.Context, instance *appsv1.Instance) (*install.ResolvedTLS, error) {
+	if instance.Spec.TLS == nil || instance.Spec.Artifact != nil {
+		return nil, nil
+	}
+	tlsConfig := instance.Spec.TLS
+	resolved := &install.ResolvedTLS{InsecureSkipVerify: tlsConfig.InsecureSkipVerify}
+	if tlsConfig.SecretRef == nil {
+		return resolved, nil
+	}
+	if tlsConfig.SecretRef.Name == "" {
+		return nil, fmt.Errorf("TLS secretRef name must not be empty")
+	}
+
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: instance.Namespace, Name: tlsConfig.SecretRef.Name}
+	if err := r.Client.Get(ctx, key, secret); err != nil {
+		return nil, fmt.Errorf("get TLS secret %q: %w", tlsConfig.SecretRef.Name, err)
+	}
+	caData := secret.Data[corev1.ServiceAccountRootCAKey]
+	certData, hasCert := secret.Data[corev1.TLSCertKey]
+	keyData, hasKey := secret.Data[corev1.TLSPrivateKeyKey]
+	if hasCert != hasKey || (hasCert && (len(certData) == 0 || len(keyData) == 0)) {
+		return nil, fmt.Errorf("TLS secret %q must contain both non-empty %q and %q keys", tlsConfig.SecretRef.Name, corev1.TLSCertKey, corev1.TLSPrivateKeyKey)
+	}
+	if len(caData) == 0 && !hasCert {
+		return nil, fmt.Errorf("TLS secret %q must contain %q or a client certificate pair", tlsConfig.SecretRef.Name, corev1.ServiceAccountRootCAKey)
+	}
+	// A standard kubernetes.io/tls Secret has no ca.crt. Trust its certificate
+	// for this source as well as making the pair available for client TLS.
+	if len(caData) == 0 {
+		caData = certData
+	}
+	resolved.CAData = append([]byte(nil), caData...)
+	resolved.CertData = append([]byte(nil), certData...)
+	resolved.KeyData = append([]byte(nil), keyData...)
 	return resolved, nil
 }
 
@@ -789,22 +818,24 @@ type dockerConfig struct {
 }
 
 type dockerAuthEntry struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Auth     string `json:"auth"` // base64(username:password)
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	Auth          string `json:"auth"` // base64(username:password)
+	IdentityToken string `json:"identitytoken"`
+	RegistryToken string `json:"registrytoken"`
 }
 
 // extractDockerAuth parses a .dockerconfigjson blob and returns credentials
 // matching the given repository URL's host.
-func extractDockerAuth(data []byte, repoURL string) (string, string, error) {
+func extractDockerAuth(data []byte, repoURL string) (install.ResolvedAuth, error) {
 	var cfg dockerConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return "", "", fmt.Errorf("unmarshal dockerconfigjson: %w", err)
+		return install.ResolvedAuth{}, fmt.Errorf("unmarshal dockerconfigjson: %w", err)
 	}
 
 	u, err := url.Parse(repoURL)
 	if err != nil {
-		return "", "", fmt.Errorf("parse repo url: %w", err)
+		return install.ResolvedAuth{}, fmt.Errorf("parse repo url: %w", err)
 	}
 	host := u.Host
 	if host == "" {
@@ -828,22 +859,29 @@ func extractDockerAuth(data []byte, repoURL string) (string, string, error) {
 			return resolveDockerAuthEntry(entry)
 		}
 	}
-	return "", "", fmt.Errorf("no matching auth entry for host %q", host)
+	return install.ResolvedAuth{}, fmt.Errorf("no matching auth entry for host %q", host)
 }
 
-func resolveDockerAuthEntry(entry dockerAuthEntry) (string, string, error) {
+func resolveDockerAuthEntry(entry dockerAuthEntry) (install.ResolvedAuth, error) {
+	token := entry.RegistryToken
+	if token == "" {
+		token = entry.IdentityToken
+	}
+	if token != "" {
+		return install.ResolvedAuth{Token: token}, nil
+	}
 	if entry.Username != "" {
-		return entry.Username, entry.Password, nil
+		return install.ResolvedAuth{Username: entry.Username, Password: entry.Password}, nil
 	}
 	if entry.Auth != "" {
 		decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
 		if err != nil {
-			return "", "", fmt.Errorf("decode auth field: %w", err)
+			return install.ResolvedAuth{}, fmt.Errorf("decode auth field: %w", err)
 		}
 		username, password, _ := strings.Cut(string(decoded), ":")
-		return username, password, nil
+		return install.ResolvedAuth{Username: username, Password: password}, nil
 	}
-	return "", "", nil
+	return install.ResolvedAuth{}, nil
 }
 
 func mergeMaps(a, b map[string]any) map[string]any {
@@ -904,6 +942,6 @@ func (r *InstanceReconciler) Remove(ctx context.Context, instance *appsv1.Instan
 	}
 
 	log.Info("removing instance")
-	instanceSpec := installerInstanceFrom(instance, instance.Spec.Values.Object, nil)
+	instanceSpec := installerInstanceFrom(instance, instance.Spec.Values.Object, nil, nil)
 	return r.Applier.Remove(ctx, instanceSpec)
 }

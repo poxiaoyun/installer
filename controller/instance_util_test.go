@@ -473,6 +473,173 @@ func TestExecutionUpToDate(t *testing.T) {
 	})
 }
 
+func TestInstallerInstanceFromTLS(t *testing.T) {
+	tlsConfig := &install.ResolvedTLS{CAData: []byte("ca"), CertData: []byte("cert"), KeyData: []byte("key"), InsecureSkipVerify: true}
+	got := installerInstanceFrom(&appsv1.Instance{}, nil, nil, tlsConfig)
+	if got.TLS != tlsConfig {
+		t.Fatalf("TLS = %#v, want %#v", got.TLS, tlsConfig)
+	}
+}
+
+func TestResolveAuthToken(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "repository-auth", Namespace: "default"},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"token":    []byte("secret-token"),
+			"username": []byte("secret-user"),
+			"password": []byte("secret-password"),
+		},
+	}
+	reconciler := &InstanceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()}
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec: appsv1.InstanceSpec{Auth: &appsv1.RepositoryAuth{
+			Token:     "inline-token",
+			SecretRef: &corev1.LocalObjectReference{Name: secret.Name},
+		}},
+	}
+
+	resolved, err := reconciler.resolveAuth(t.Context(), instance)
+	if err != nil {
+		t.Fatalf("resolveAuth() error = %v", err)
+	}
+	if resolved.Token != "inline-token" || resolved.Username != "secret-user" || resolved.Password != "secret-password" {
+		t.Fatalf("resolveAuth() = %#v", resolved)
+	}
+
+	instance.Spec.Auth.Token = ""
+	resolved, err = reconciler.resolveAuth(t.Context(), instance)
+	if err != nil {
+		t.Fatalf("resolveAuth() Secret token error = %v", err)
+	}
+	if resolved.Token != "secret-token" {
+		t.Fatalf("resolveAuth() Secret token = %q, want secret-token", resolved.Token)
+	}
+
+	dockerSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "registry-auth", Namespace: "default"},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{
+			corev1.DockerConfigJsonKey: []byte(`{"auths":{"registry.example.com":{"registrytoken":"registry-token"}}}`),
+		},
+	}
+	if err := reconciler.Client.Create(t.Context(), dockerSecret); err != nil {
+		t.Fatalf("create Docker config Secret: %v", err)
+	}
+	instance.Spec.URL = "oci://registry.example.com/charts/demo"
+	instance.Spec.Auth.SecretRef.Name = dockerSecret.Name
+	resolved, err = reconciler.resolveAuth(t.Context(), instance)
+	if err != nil {
+		t.Fatalf("resolveAuth() Docker token error = %v", err)
+	}
+	if resolved.Token != "registry-token" {
+		t.Fatalf("resolveAuth() Docker token = %q, want registry-token", resolved.Token)
+	}
+}
+
+func TestResolveTLS(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "repository-ca", Namespace: "default"},
+		Data: map[string][]byte{
+			corev1.ServiceAccountRootCAKey: []byte("test-ca"),
+			corev1.TLSCertKey:              []byte("test-cert"),
+			corev1.TLSPrivateKeyKey:        []byte("test-key"),
+		},
+	}
+	reconciler := &InstanceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()}
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec: appsv1.InstanceSpec{TLS: &appsv1.RepositoryTLS{
+			SecretRef:          &corev1.LocalObjectReference{Name: "repository-ca"},
+			InsecureSkipVerify: true,
+		}},
+	}
+
+	got, err := reconciler.resolveTLS(t.Context(), instance)
+	if err != nil {
+		t.Fatalf("resolveTLS() error = %v", err)
+	}
+	if string(got.CAData) != "test-ca" || string(got.CertData) != "test-cert" || string(got.KeyData) != "test-key" || !got.InsecureSkipVerify {
+		t.Fatalf("resolveTLS() = %#v", got)
+	}
+	got.CAData[0] = 'X'
+	if string(secret.Data[corev1.ServiceAccountRootCAKey]) != "test-ca" {
+		t.Fatal("resolveTLS() returned Secret-backed CA data without copying it")
+	}
+
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "source-tls", Namespace: "default"},
+		Type:       corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			corev1.TLSCertKey:       []byte("source-cert"),
+			corev1.TLSPrivateKeyKey: []byte("source-key"),
+		},
+	}
+	if err := reconciler.Client.Create(t.Context(), tlsSecret); err != nil {
+		t.Fatalf("create standard TLS Secret: %v", err)
+	}
+	instance.Spec.TLS.SecretRef.Name = tlsSecret.Name
+	tlsOnly, err := reconciler.resolveTLS(t.Context(), instance)
+	if err != nil {
+		t.Fatalf("resolveTLS() standard TLS Secret error = %v", err)
+	}
+	if string(tlsOnly.CAData) != "source-cert" || string(tlsOnly.CertData) != "source-cert" || string(tlsOnly.KeyData) != "source-key" {
+		t.Fatalf("resolveTLS() standard TLS Secret = %#v", tlsOnly)
+	}
+	instance.Spec.TLS.SecretRef.Name = secret.Name
+
+	delete(secret.Data, corev1.TLSPrivateKeyKey)
+	if err := reconciler.Client.Update(t.Context(), secret); err != nil {
+		t.Fatalf("update TLS Secret: %v", err)
+	}
+	if _, err := reconciler.resolveTLS(t.Context(), instance); err == nil {
+		t.Fatal("resolveTLS() accepted an incomplete client certificate pair")
+	}
+}
+
+func TestSourceOptionsAreIgnoredWhenNotApplicable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "source-ca", Namespace: "default"},
+		Data:       map[string][]byte{corev1.ServiceAccountRootCAKey: []byte("test-ca")},
+	}
+	reconciler := &InstanceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(tlsSecret).Build()}
+	missingSecret := &corev1.LocalObjectReference{Name: "does-not-exist"}
+
+	nonHelm := &appsv1.Instance{ObjectMeta: metav1.ObjectMeta{Namespace: "default"}, Spec: appsv1.InstanceSpec{
+		Kind: appsv1.InstanceKindKustomize,
+		TLS:  &appsv1.RepositoryTLS{SecretRef: &corev1.LocalObjectReference{Name: tlsSecret.Name}},
+	}}
+	if got, err := reconciler.resolveTLS(t.Context(), nonHelm); err != nil || got == nil || string(got.CAData) != "test-ca" {
+		t.Fatalf("resolveTLS() for non-Helm Instance = %#v, %v; want resolved CA", got, err)
+	}
+
+	artifact := &appsv1.Instance{Spec: appsv1.InstanceSpec{
+		Kind:     appsv1.InstanceKindHelm,
+		Artifact: &appsv1.Artifact{},
+		Auth:     &appsv1.RepositoryAuth{SecretRef: missingSecret},
+		TLS:      &appsv1.RepositoryTLS{SecretRef: missingSecret},
+	}}
+	if got, err := reconciler.resolveAuth(t.Context(), artifact); err != nil || got != nil {
+		t.Fatalf("resolveAuth() for Artifact source = %#v, %v; want nil, nil", got, err)
+	}
+	if got, err := reconciler.resolveTLS(t.Context(), artifact); err != nil || got != nil {
+		t.Fatalf("resolveTLS() for Artifact source = %#v, %v; want nil, nil", got, err)
+	}
+}
+
 func TestValidateInstanceSource(t *testing.T) {
 	validArtifact := func() *appsv1.Artifact {
 		return &appsv1.Artifact{
@@ -489,10 +656,13 @@ func TestValidateInstanceSource(t *testing.T) {
 		{name: "artifact", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact()}},
 		{name: "default helm artifact", spec: appsv1.InstanceSpec{Artifact: validArtifact()}},
 		{name: "missing source", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm}, wantErr: true},
-		{name: "artifact for kustomize", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindKustomize, Artifact: validArtifact()}, wantErr: true},
-		{name: "artifact with URL", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), URL: "oci://example.test/chart"}, wantErr: true},
-		{name: "artifact with version", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), Version: "1.0.0"}, wantErr: true},
-		{name: "artifact with auth", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), Auth: &appsv1.RepositoryAuth{}}, wantErr: true},
+		{name: "artifact for kustomize", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindKustomize, Artifact: validArtifact()}},
+		{name: "artifact takes precedence over URL", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), URL: "oci://example.test/chart"}},
+		{name: "artifact with ignored version", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), Version: "1.0.0"}},
+		{name: "artifact with ignored chart and path", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), Chart: "ignored", Path: "ignored"}},
+		{name: "artifact with ignored auth", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), Auth: &appsv1.RepositoryAuth{}}},
+		{name: "artifact with ignored tls", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindHelm, Artifact: validArtifact(), TLS: &appsv1.RepositoryTLS{}}},
+		{name: "kustomize with ignored tls", spec: appsv1.InstanceSpec{Kind: appsv1.InstanceKindKustomize, URL: "https://example.test/repo.git", TLS: &appsv1.RepositoryTLS{}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -5,41 +5,15 @@ import (
 	"context"
 	"time"
 
-	"helm.sh/helm/v3/pkg/chart"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
+	"xiaoshiai.cn/installer/install/filesystem"
 )
 
 // PostRenderer is an interface for modifying rendered manifests before they are applied.
 // It receives the loaded chart so renderers can access chart metadata or raw files.
 type PostRenderer interface {
 	Run(renderedManifests *bytes.Buffer, ch *chart.Chart) (modifiedManifests *bytes.Buffer, err error)
-}
-
-// IdentifiedPostRenderer exposes a stable identity for inputs that affect
-// post-rendered manifests but are not part of Helm values.
-type IdentifiedPostRenderer interface {
-	PostRenderer
-	Identity() string
-}
-
-type identifiedPostRenderer struct {
-	PostRenderer
-	identity string
-}
-
-func (r identifiedPostRenderer) Identity() string {
-	return r.identity
-}
-
-func WithPostRendererIdentity(renderer PostRenderer, identity string) PostRenderer {
-	return identifiedPostRenderer{PostRenderer: renderer, identity: identity}
-}
-
-func PostRendererIdentity(renderer PostRenderer) string {
-	if identified, ok := renderer.(IdentifiedPostRenderer); ok {
-		return identified.Identity()
-	}
-	return ""
 }
 
 // PostRendererChain chains multiple PostRenderers sequentially.
@@ -72,9 +46,7 @@ type Instance struct {
 	Path       string
 	Artifact   *appsv1.Artifact
 
-	// Location is the local path where the bundle is located
-	// installer should use this path to apply the bundle if exists
-	Location string
+	Location filesystem.Location
 
 	// Resources is the previously applied resources
 	Resources         []ManagedResource
@@ -83,18 +55,30 @@ type Instance struct {
 
 	Options []Option
 
-	// Auth holds resolved credentials for the chart repository.
+	// Auth holds resolved credentials for the URL source.
 	Auth *ResolvedAuth
+
+	// TLS holds resolved TLS settings for URL source downloads.
+	TLS *ResolvedTLS
 
 	// PostRenderer is an optional post-render pipeline applied to rendered manifests
 	// before they are submitted to Kubernetes.
 	PostRenderer PostRenderer
 }
 
-// ResolvedAuth contains plain-text repository credentials resolved from the Instance spec.
+// ResolvedAuth contains plain-text source credentials resolved from the Instance spec.
 type ResolvedAuth struct {
+	Token    string
 	Username string
 	Password string
+}
+
+// ResolvedTLS contains URL source TLS settings resolved from the Instance spec.
+type ResolvedTLS struct {
+	CAData             []byte
+	CertData           []byte
+	KeyData            []byte
+	InsecureSkipVerify bool
 }
 
 type Option = appsv1.Option

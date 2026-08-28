@@ -9,6 +9,8 @@ import (
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/install"
 	"xiaoshiai.cn/installer/install/download"
+	"xiaoshiai.cn/installer/install/filesystem"
+	"xiaoshiai.cn/installer/install/filesystem/osfs"
 	"xiaoshiai.cn/installer/install/helm"
 	"xiaoshiai.cn/installer/install/kustomize"
 	"xiaoshiai.cn/installer/install/native"
@@ -24,14 +26,16 @@ func NewDefaultOptions() *Options {
 }
 
 func NewDelegate(cfg *rest.Config, cli client.Client, options *Options) *BundleApplier {
+	fsys := osfs.New()
+	downloader := download.NewDownloader(options.CacheDir, fsys)
 	return &BundleApplier{
 		appliers: map[appsv1.InstanceKind]install.Installer{
 			appsv1.InstanceKindHelm:      helm.New(cfg),
 			appsv1.InstanceKindKustomize: native.New(cli, kustomize.KustomizeBuildFunc),
 			appsv1.InstanceKindTemplate:  native.New(cli, template.NewTemplaterFunc(cfg)),
 		},
-		downloader:     download.NewDownloader(options.CacheDir),
-		artifactLoader: download.NewArtifactLoader(cli, options.CacheDir),
+		downloader:     downloader,
+		artifactLoader: download.NewArtifactLoader(cli),
 	}
 }
 
@@ -44,11 +48,10 @@ type BundleApplier struct {
 var _ install.Installer = &BundleApplier{}
 
 func (b *BundleApplier) Template(ctx context.Context, instance install.Instance) ([]byte, error) {
-	into, _, cleanup, err := b.resolveLocation(ctx, instance)
+	into, _, err := b.resolveLocation(ctx, instance)
 	if err != nil {
 		return nil, fmt.Errorf("resolve source: %w", err)
 	}
-	defer cleanup()
 	instance.Location = into
 	if apply, ok := b.appliers[instance.Kind]; ok {
 		return apply.Template(ctx, instance)
@@ -56,27 +59,34 @@ func (b *BundleApplier) Template(ctx context.Context, instance install.Instance)
 	return nil, fmt.Errorf("unknown bundle kind: %s", instance.Kind)
 }
 
-func (b *BundleApplier) Download(ctx context.Context, instance install.Instance) (string, error) {
-	if chart := instance.Chart; chart == "" {
-		instance.Chart = instance.Name
+func (b *BundleApplier) Download(ctx context.Context, instance install.Instance) (filesystem.Location, error) {
+	name := instance.Chart
+	if name == "" {
+		name = instance.Name
 	}
-	return b.downloader.Download(ctx, instance)
+	return b.downloader.Download(ctx, download.DownloadOptions{
+		URL:     instance.Repository,
+		Name:    name,
+		Version: instance.Version,
+		Subpath: instance.Path,
+		Auth:    instance.Auth,
+		TLS:     instance.TLS,
+	})
 }
 
-func (b *BundleApplier) resolveLocation(ctx context.Context, instance install.Instance) (string, string, func(), error) {
+func (b *BundleApplier) resolveLocation(ctx context.Context, instance install.Instance) (filesystem.Location, string, error) {
 	if instance.Artifact != nil {
 		return b.artifactLoader.Load(ctx, instance.Namespace, instance.Artifact)
 	}
 	path, err := b.Download(ctx, instance)
-	return path, "", func() {}, err
+	return path, "", err
 }
 
 func (b *BundleApplier) Apply(ctx context.Context, instance install.Instance) (*install.InstanceStatus, error) {
-	into, artifactDigest, cleanup, err := b.resolveLocation(ctx, instance)
+	into, artifactDigest, err := b.resolveLocation(ctx, instance)
 	if err != nil {
 		return nil, fmt.Errorf("resolve source: %w", err)
 	}
-	defer cleanup()
 	instance.Location = into
 	if apply, ok := b.appliers[instance.Kind]; ok {
 		status, err := apply.Apply(ctx, instance)

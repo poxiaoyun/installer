@@ -4,22 +4,27 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/chartutil"
-	"helm.sh/helm/v3/pkg/engine"
-	"helm.sh/helm/v3/pkg/releaseutil"
+	"helm.sh/helm/v4/pkg/action"
+	chartcommon "helm.sh/helm/v4/pkg/chart/common"
+	chartcommonutil "helm.sh/helm/v4/pkg/chart/common/util"
+	"helm.sh/helm/v4/pkg/chart/loader/archive"
+	chart "helm.sh/helm/v4/pkg/chart/v2"
+	"helm.sh/helm/v4/pkg/chart/v2/loader"
+	chartutil "helm.sh/helm/v4/pkg/chart/v2/util"
+	"helm.sh/helm/v4/pkg/engine"
+	releaseutil "helm.sh/helm/v4/pkg/release/v1/util"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
 	"xiaoshiai.cn/installer/install"
+	"xiaoshiai.cn/installer/install/filesystem"
 )
 
 func NewTemplaterFunc(cfg *rest.Config) func(ctx context.Context, instance install.Instance) ([]byte, error) {
@@ -33,20 +38,18 @@ type Templater struct {
 
 // TemplatesTemplate using helm template engine to render,but allow apply to different namespaces
 func (t Templater) Template(ctx context.Context, instance install.Instance) ([]byte, error) {
-	dir := instance.Location
-
-	chart, err := loader.Load(dir)
+	chart, err := Load(instance.Name, instance.Version, instance.Location)
 	if err != nil {
 		return nil, err
 	}
 	vals := instance.Values
-	options := chartutil.ReleaseOptions{
+	options := chartcommon.ReleaseOptions{
 		Name:      instance.Name,
 		Namespace: instance.Namespace,
 		IsInstall: true,
 	}
 
-	caps := chartutil.DefaultCapabilities
+	caps := chartcommon.DefaultCapabilities.Copy()
 
 	if t.Config != nil && t.DC == nil {
 		cs, err := kubernetes.NewForConfig(t.Config)
@@ -66,7 +69,7 @@ func (t Templater) Template(ctx context.Context, instance install.Instance) ([]b
 			return nil, fmt.Errorf("could not get apiVersions from Kubernetes: %w", err)
 		}
 		caps.APIVersions = apiVersions
-		caps.KubeVersion = chartutil.KubeVersion{
+		caps.KubeVersion = chartcommon.KubeVersion{
 			Version: kubeVersion.GitVersion,
 			Major:   kubeVersion.Major,
 			Minor:   kubeVersion.Minor,
@@ -76,7 +79,7 @@ func (t Templater) Template(ctx context.Context, instance install.Instance) ([]b
 	if err := chartutil.ProcessDependencies(chart, vals); err != nil {
 		return nil, err
 	}
-	valuesToRender, err := chartutil.ToRenderValues(chart, vals, options, caps)
+	valuesToRender, err := chartcommonutil.ToRenderValues(chart, vals, options, caps)
 	if err != nil {
 		return nil, err
 	}
@@ -121,19 +124,26 @@ func (t Templater) Template(ctx context.Context, instance install.Instance) ([]b
 
 const chartFileName = "Chart.yaml"
 
-func Load(name, version, path string) (*chart.Chart, error) {
+func Load(name, version string, location filesystem.Location) (*chart.Chart, error) {
 	if version == "" {
 		version = "0.0.0"
 	}
-	absdir, err := filepath.Abs(path)
+	info, err := location.FS.Stat(location.Path)
 	if err != nil {
 		return nil, err
 	}
-	absdir += string(filepath.Separator)
+	if !info.IsDir() {
+		file, err := location.FS.Open(location.Path)
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		return loader.LoadArchive(file)
+	}
 	containsChartFile := false
-	files := []*loader.BufferedFile{}
-	walk := func(name string, fi os.FileInfo, err error) error {
-		relfilename := strings.TrimPrefix(name, absdir)
+	files := []*archive.BufferedFile{}
+	walk := func(filename string, entry fs.DirEntry, err error) error {
+		relfilename := strings.TrimPrefix(strings.TrimPrefix(filename, location.Path), "/")
 		if relfilename == "" {
 			return nil
 		}
@@ -143,17 +153,17 @@ func Load(name, version, path string) (*chart.Chart, error) {
 		if err != nil {
 			return err
 		}
-		if fi.IsDir() {
+		if entry.IsDir() {
 			return nil
 		}
-		data, err := os.ReadFile(name)
+		data, err := location.FS.ReadFile(filename)
 		if err != nil {
 			return err
 		}
-		files = append(files, &loader.BufferedFile{Name: relfilename, Data: data})
+		files = append(files, &archive.BufferedFile{Name: relfilename, Data: data})
 		return nil
 	}
-	if err = filepath.Walk(absdir, walk); err != nil {
+	if err = fs.WalkDir(location.FS, path.Clean(location.Path), walk); err != nil {
 		return nil, err
 	}
 	if !containsChartFile {
@@ -166,7 +176,7 @@ func Load(name, version, path string) (*chart.Chart, error) {
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, &loader.BufferedFile{Name: chartFileName, Data: chartfilecontent})
+		files = append(files, &archive.BufferedFile{Name: chartFileName, Data: chartfilecontent})
 	}
 	return loader.LoadFiles(files)
 }
