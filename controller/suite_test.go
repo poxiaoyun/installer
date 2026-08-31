@@ -9,19 +9,19 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	ctrl "sigs.k8s.io/controller-runtime"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"xiaoshiai.cn/installer/apis/apps"
 	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/controller"
 )
@@ -41,7 +41,8 @@ var (
 	testdatadir string
 	testhelmdir string
 	// temporary cache dir created for tests
-	testCacheDir string
+	testCacheDir  string
+	controllerRun chan error
 )
 
 // decide whether to allow online tests
@@ -110,33 +111,61 @@ var _ = BeforeSuite(func() {
 	testhelmdir, err = filepath.Abs(filepath.Join("..", "testdata", "helm-test"))
 	Expect(err).NotTo(HaveOccurred())
 
-	// setup ctrl manager
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:           scheme.Scheme,
-		LeaderElectionID: apps.GroupName,
-		Metrics:          metricsserver.Options{BindAddress: "0"},
-	})
-	Expect(err).NotTo(HaveOccurred())
-
-	// register controller
-	controllerOptions := controller.NewDefaultOptions()
 	// create a dedicated temp dir for cache to avoid interference between tests
 	tmpCacheDir, err := os.MkdirTemp("", "installer-test-cache-")
 	Expect(err).NotTo(HaveOccurred())
 	testCacheDir = tmpCacheDir
-	controllerOptions.CacheDir = testCacheDir
-	err = controller.Setup(ctx, mgr, controllerOptions)
-	Expect(err).NotTo(HaveOccurred())
 
+	kubeconfig := clientcmdapi.Config{
+		Clusters: map[string]*clientcmdapi.Cluster{
+			"envtest": {
+				Server:                   cfg.Host,
+				CertificateAuthorityData: cfg.CAData,
+				InsecureSkipTLSVerify:    cfg.Insecure,
+			},
+		},
+		AuthInfos: map[string]*clientcmdapi.AuthInfo{
+			"envtest": {
+				ClientCertificateData: cfg.CertData,
+				ClientKeyData:         cfg.KeyData,
+				Token:                 cfg.BearerToken,
+				Username:              cfg.Username,
+				Password:              cfg.Password,
+			},
+		},
+		Contexts: map[string]*clientcmdapi.Context{
+			"envtest": {Cluster: "envtest", AuthInfo: "envtest"},
+		},
+		CurrentContext: "envtest",
+	}
+	kubeconfigData, err := clientcmd.Write(kubeconfig)
+	Expect(err).NotTo(HaveOccurred())
+	kubeconfigPath := filepath.Join(testCacheDir, "kubeconfig")
+	Expect(os.WriteFile(kubeconfigPath, kubeconfigData, 0o600)).To(Succeed())
+	Expect(os.Setenv("KUBECONFIG", kubeconfigPath)).To(Succeed())
+
+	controllerOptions := controller.NewDefaultOptions()
+	controllerOptions.CacheDir = testCacheDir
+	controllerOptions.MetricsAddr = "0"
+	controllerOptions.ProbeAddr = "0"
+
+	controllerRun = make(chan error, 1)
 	go func() {
-		defer GinkgoRecover()
-		Expect(mgr.Start(ctx)).ToNot(HaveOccurred())
+		controllerRun <- controller.Run(ctx, controllerOptions)
 	}()
 })
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
-	cancel() // stop mgr
+	cancel()
+	if controllerRun != nil {
+		select {
+		case err := <-controllerRun:
+			Expect(err).NotTo(HaveOccurred())
+		case <-time.After(30 * time.Second):
+			Fail("controller manager did not stop")
+		}
+	}
 	if testEnv != nil && cfg != nil {
 		err := testEnv.Stop()
 		Expect(err).NotTo(HaveOccurred())

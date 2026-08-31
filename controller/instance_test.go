@@ -377,11 +377,31 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("should wait and resume when dependency becomes ready", func() {
-		// Create a plugin with a non-existent dependency
-		plugin := &appsv1.Instance{
+	It("resumes a waiting Instance after a dependency status-only Ready update", func() {
+		dependency := &appsv1.Instance{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "pending-dep-test",
+				Name:      "status-dependency",
+				Namespace: "default",
+			},
+			Spec: appsv1.InstanceSpec{
+				Kind:         appsv1.InstanceKindHelm,
+				Path:         "testdata/helm-test",
+				URL:          "file://" + testhelmdir,
+				Version:      "v0.0.0",
+				Dependencies: []corev1.ObjectReference{{Name: "status-blocker"}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, dependency)).To(Succeed())
+		Eventually(func() appsv1.Phase {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(dependency), dependency); err != nil {
+				return ""
+			}
+			return dependency.Status.Phase
+		}, 30*time.Second, 100*time.Millisecond).Should(Equal(appsv1.PhaseWaiting))
+
+		dependent := &appsv1.Instance{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "status-dependent",
 				Namespace: "default",
 			},
 			Spec: appsv1.InstanceSpec{
@@ -391,40 +411,64 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 				Version: "v0.0.0",
 				Dependencies: []corev1.ObjectReference{
 					{
-						Name:      "non-existent-dependency",
+						Name:      dependency.Name,
 						Namespace: "default",
 					},
 				},
 			},
 		}
-		err := k8sClient.Create(ctx, plugin)
+		err := k8sClient.Create(ctx, dependent)
 		Expect(err).NotTo(HaveOccurred())
 
-		// A missing dependency is an expected wait, not a reconciliation failure.
-		err = waitForPhase(ctx, plugin, appsv1.PhaseWaiting)
+		err = waitForPhase(ctx, dependent, appsv1.PhaseWaiting)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(plugin.Status.Message).To(ContainSubstring("dependency default/non-existent-dependency is not found"))
+		Expect(dependent.Status.Message).To(Equal("dependency default/status-dependency is not ready"))
 
 		// Verify DependenciesReady condition is false
-		depsCondition := meta.FindStatusCondition(plugin.Status.Conditions, appsv1.ConditionDependenciesReady)
+		depsCondition := meta.FindStatusCondition(dependent.Status.Conditions, appsv1.ConditionDependenciesReady)
 		Expect(depsCondition).NotTo(BeNil())
 		Expect(depsCondition.Status).To(Equal(metav1.ConditionFalse))
 		Expect(depsCondition.Reason).To(Equal(controller.ReasonDependencyNotReady))
 
-		dependency := &appsv1.Instance{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "non-existent-dependency",
-				Namespace: "default",
-			},
-			Spec: appsv1.InstanceSpec{
-				Kind:    appsv1.InstanceKindHelm,
-				Path:    "testdata/helm-test",
-				URL:     "file://" + testhelmdir,
-				Version: "v0.0.0",
-			},
-		}
-		Expect(k8sClient.Create(ctx, dependency)).To(Succeed())
-		Expect(waitForPhase(ctx, plugin, appsv1.PhaseInstalled)).To(Succeed())
+		Consistently(func() appsv1.Phase {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(dependent), dependent); err != nil {
+				return ""
+			}
+			return dependent.Status.Phase
+		}, time.Second, 100*time.Millisecond).Should(Equal(appsv1.PhaseWaiting))
+
+		// Change only the dependency observation after all creation events have
+		// settled, so this status update is the sole event that can unblock the dependent.
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dependency), dependency)).To(Succeed())
+		dependency.Status.ObservedGeneration = dependency.Generation
+		dependency.Status.Phase = appsv1.PhaseInstalled
+		dependency.Status.Message = ""
+		dependency.Status.Values = appsv1.Values{Object: map[string]any{
+			"global": map[string]any{"replicas": float64(1)},
+		}}
+		dependency.Status.Conditions = nil
+		meta.SetStatusCondition(&dependency.Status.Conditions, metav1.Condition{
+			Type:               appsv1.ConditionInstalled,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: dependency.Generation,
+			Reason:             controller.ReasonInstalled,
+			Message:            "Instance is installed and ready",
+		})
+		meta.SetStatusCondition(&dependency.Status.Conditions, metav1.Condition{
+			Type:               appsv1.ConditionReady,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: dependency.Generation,
+			Reason:             controller.ReasonReady,
+			Message:            "Instance is ready",
+		})
+		Expect(k8sClient.Status().Update(ctx, dependency)).To(Succeed())
+
+		Eventually(func() appsv1.Phase {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(dependent), dependent); err != nil {
+				return ""
+			}
+			return dependent.Status.Phase
+		}, 10*time.Second, 100*time.Millisecond).Should(Equal(appsv1.PhaseInstalled))
 	})
 
 	It("should set Message when installation fails and clear on success", func() {
@@ -470,7 +514,7 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 	})
 
 	It("cleanup test instances", func() {
-		instances := []string{"obs-gen-test", "condition-test", "phase-transition-test", "pending-dep-test", "non-existent-dependency", "last-error-test"}
+		instances := []string{"obs-gen-test", "condition-test", "phase-transition-test", "status-dependent", "status-dependency", "last-error-test"}
 		for _, name := range instances {
 			plugin := &appsv1.Instance{
 				ObjectMeta: metav1.ObjectMeta{
