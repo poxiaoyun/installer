@@ -81,7 +81,10 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 		Complete(r)
 }
 
-const instanceDependencyIndexField = "spec.dependencies.instance"
+const (
+	instanceDependencyIndexField = "spec.dependencies.instance"
+	dependencyRequeueAfter       = time.Minute
+)
 
 type dependencyEventHandler struct {
 	Client client.Client
@@ -279,7 +282,18 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return ctrl.Result{}, err
 		}
 	}
+	if err == nil && isWaitingForDependencies(instance) {
+		return ctrl.Result{RequeueAfter: dependencyRequeueAfter}, nil
+	}
 	return ctrl.Result{}, err
+}
+
+func isWaitingForDependencies(instance *appsv1.Instance) bool {
+	condition := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionDependenciesReady)
+	return instance.Status.Phase == appsv1.PhaseWaiting &&
+		condition != nil &&
+		condition.Status == metav1.ConditionFalse &&
+		condition.Reason == ReasonDependencyNotReady
 }
 
 func (r *InstanceReconciler) Sync(ctx context.Context, instance *appsv1.Instance) error {

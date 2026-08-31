@@ -171,8 +171,12 @@ func TestMissingDependencyWaitsWithoutReconcileError(t *testing.T) {
 	reconciler := &InstanceReconciler{Client: cli, Scheme: scheme, Applier: applier}
 	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
 
-	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+	result, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
 		t.Fatalf("Reconcile() error = %v, want expected dependency wait", err)
+	}
+	if result.RequeueAfter != time.Minute {
+		t.Fatalf("Reconcile() RequeueAfter = %s, want %s", result.RequeueAfter, time.Minute)
 	}
 	if applier.applyCount != 0 {
 		t.Fatalf("Apply() calls = %d, want 0", applier.applyCount)
@@ -238,7 +242,7 @@ func TestInstalledInstanceIgnoresUnreadyDependency(t *testing.T) {
 	}
 }
 
-func TestDependencyEventRequestsDependents(t *testing.T) {
+func TestDependencyEventRequestsOnlyDependentsPendingInstallation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add apps scheme: %v", err)

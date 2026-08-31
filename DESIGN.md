@@ -49,10 +49,12 @@ One reconciliation follows this order:
 2. Before executing a generation that has not yet installed successfully,
    observe every declared dependency. A missing or unready dependency projects
    `Waiting` with a false dependency condition and ends reconciliation
-   successfully; dependency Instance changes enqueue dependents whose current
-   generation has not installed successfully. Dependencies are ordering
-   prerequisites, not runtime health inputs, so their later state does not
-   affect an installed dependent.
+   successfully. Dependency Instance changes enqueue indexed dependents whose
+   current generation has not installed successfully, and a normal dependency
+   wait also schedules a one-minute fallback reconcile so a missed watch event
+   cannot leave it blocked forever. Dependencies are ordering prerequisites,
+   not runtime health inputs, so their later state does not affect an installed
+   dependent.
 3. Validate the source, resolve values and source credentials, and create
    one `install.Instance` input.
 4. Build the common post-render pipeline.
@@ -255,9 +257,11 @@ and SSH endpoints; CEL annotations may replace states or endpoints and add
 summary or additional endpoints.
 
 `Waiting` means the current generation has been observed but execution is
-blocked on an expected external prerequisite. `Reconciling` means installation
-or update work is actively proceeding, while `Failed` is reserved for an
-actual reconciliation or runtime failure.
+blocked on an expected external prerequisite. A dependency wait is primarily
+woken by the dependency Instance watch and has a one-minute scheduled retry as
+a lost-event fallback. `Reconciling` means installation or update work is
+actively proceeding, while `Failed` is reserved for an actual reconciliation
+or runtime failure.
 
 Conditions describe independent guarantees: dependencies, successful
 installation, runtime readiness, expression evaluation, and safe scale
