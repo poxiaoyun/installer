@@ -326,7 +326,7 @@ func (r *InstanceReconciler) syncDeps(ctx context.Context, instance *appsv1.Inst
 	}
 	if !readiness.ready {
 		instance.Status.Phase = appsv1.PhaseWaiting
-		instance.Status.Message = readiness.message
+		instance.Status.Message = ""
 		r.setCondition(instance, appsv1.ConditionDependenciesReady, metav1.ConditionFalse, ReasonDependencyNotReady, readiness.message)
 		return false, nil
 	}

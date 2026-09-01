@@ -161,17 +161,17 @@ func computeJobPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 	allCompleted := !hasRunning && !hasPending
 	if allCompleted {
 		if hasFailed && hasSucceeded {
-			return appsv1.PhasePartialFailed, false, getUnhealthyMessage(states)
+			return appsv1.PhasePartialFailed, false, getFailureMessage(states)
 		}
 		if hasFailed {
-			return appsv1.PhaseFailed, false, getUnhealthyMessage(states)
+			return appsv1.PhaseFailed, false, getFailureMessage(states)
 		}
 		if hasSucceeded {
 			return appsv1.PhaseSucceeded, true, ""
 		}
 	}
 	if hasUnknown {
-		return appsv1.PhaseDegraded, false, getUnhealthyMessage(states)
+		return appsv1.PhaseDegraded, false, ""
 	}
 	if hasRunning {
 		return appsv1.PhaseRunning, true, ""
@@ -210,10 +210,10 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 		}
 	}
 	if hasUnhealthy {
-		return appsv1.PhaseUnhealthy, false, getUnhealthyMessage(states)
+		return appsv1.PhaseUnhealthy, false, getFailureMessage(states)
 	}
 	if hasDegraded {
-		return appsv1.PhaseDegraded, false, getUnhealthyMessage(states)
+		return appsv1.PhaseDegraded, false, ""
 	}
 	return appsv1.PhaseHealthy, true, ""
 }
@@ -282,19 +282,19 @@ func detectInstanceWorkloadType(resources []appsv1.ManagedResource) InstanceWork
 	return InstanceWorkloadTypeConfig
 }
 
-func getUnhealthyMessage(states []appsv1.State) string {
+func getFailureMessage(states []appsv1.State) string {
 	var messages []string
 	for _, s := range states {
-		if !isStateHealthy(s.Status) && s.Message != "" {
+		if isStateFailure(s.Status) && s.Message != "" {
 			messages = append(messages, s.Message)
 		}
 	}
 	return strings.Join(messages, "\n")
 }
 
-func isStateHealthy(status string) bool {
+func isStateFailure(status string) bool {
 	switch status {
-	case apps.StateStatusRunning, apps.StateStatusHealthy, apps.StateStatusActive, apps.StateStatusScaledToZero, apps.StateStatusSucceeded, apps.StateStatusCompleted:
+	case apps.StateStatusFailed, apps.StateStatusError, apps.StateStatusCrashLoopBackOff, apps.StateStatusUnhealthy:
 		return true
 	}
 	return false

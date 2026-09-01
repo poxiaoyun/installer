@@ -422,13 +422,14 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 
 		err = waitForPhase(ctx, dependent, appsv1.PhaseWaiting)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(dependent.Status.Message).To(Equal("dependency default/status-dependency is not ready"))
+		Expect(dependent.Status.Message).To(BeEmpty())
 
 		// Verify DependenciesReady condition is false
 		depsCondition := meta.FindStatusCondition(dependent.Status.Conditions, appsv1.ConditionDependenciesReady)
 		Expect(depsCondition).NotTo(BeNil())
 		Expect(depsCondition.Status).To(Equal(metav1.ConditionFalse))
 		Expect(depsCondition.Reason).To(Equal(controller.ReasonDependencyNotReady))
+		Expect(depsCondition.Message).To(Equal("dependency default/status-dependency is not ready"))
 
 		Consistently(func() appsv1.Phase {
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(dependent), dependent); err != nil {

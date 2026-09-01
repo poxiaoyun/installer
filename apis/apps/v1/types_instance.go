@@ -210,8 +210,8 @@ type InstanceStatus struct {
 	// Phase is the current lifecycle or runtime state of the Instance.
 	Phase Phase `json:"phase,omitempty"`
 
-	// Message is the message associated with the status
-	// Contains error message when phase is Failed, cleared on success.
+	// Message describes an installation or runtime failure. Expected progress
+	// states such as Waiting, Pending, Scaling, and Updating leave it empty.
 	Message string `json:"message,omitempty"`
 
 	// Note contains the rendered notes from helm chart

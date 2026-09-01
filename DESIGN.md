@@ -261,7 +261,9 @@ blocked on an expected external prerequisite. A dependency wait is primarily
 woken by the dependency Instance watch and has a one-minute scheduled retry as
 a lost-event fallback. `Reconciling` means installation or update work is
 actively proceeding, while `Failed` is reserved for an actual reconciliation
-or runtime failure.
+or runtime failure. The top-level status message describes actual installation
+or runtime failures; expected progress such as waiting, pending, scaling, and
+updating keeps its detail on the owning condition or state instead.
 
 Conditions describe independent guarantees: dependencies, successful
 installation, runtime readiness, expression evaluation, and safe scale

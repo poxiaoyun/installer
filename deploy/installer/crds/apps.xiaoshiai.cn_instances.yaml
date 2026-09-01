@@ -457,8 +457,8 @@ spec:
                 type: array
               message:
                 description: |-
-                  Message is the message associated with the status
-                  Contains error message when phase is Failed, cleared on success.
+                  Message describes an installation or runtime failure. Expected progress
+                  states such as Waiting, Pending, Scaling, and Updating leave it empty.
                 type: string
               note:
                 description: Note contains the rendered notes from helm chart

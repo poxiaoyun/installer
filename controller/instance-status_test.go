@@ -392,25 +392,72 @@ func TestDefaultDeploymentStateReportsScalingBeforeDesiredReplicasExist(t *testi
 	}
 }
 
+func TestSyncStatusKeepsDeploymentProgressMessageOnState(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := k8sappsv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	two := int32(2)
+	deployment := &k8sappsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec:       k8sappsv1.DeploymentSpec{Replicas: &two},
+		Status: k8sappsv1.DeploymentStatus{
+			Conditions: []k8sappsv1.DeploymentCondition{{
+				Type:    k8sappsv1.DeploymentAvailable,
+				Status:  corev1.ConditionFalse,
+				Message: "Deployment does not have minimum availability.",
+			}},
+		},
+	}
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Status: appsv1.InstanceStatus{Resources: []appsv1.ManagedResource{{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+			Namespace:  "default",
+			Name:       "web",
+		}}},
+	}
+	r := &InstanceReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment).Build()}
+
+	if err := r.syncStatus(t.Context(), instance); err != nil {
+		t.Fatal(err)
+	}
+	if instance.Status.Phase != appsv1.PhaseDegraded {
+		t.Fatalf("phase = %q, want %q", instance.Status.Phase, appsv1.PhaseDegraded)
+	}
+	if instance.Status.Message != "" {
+		t.Fatalf("message = %q, want empty", instance.Status.Message)
+	}
+	if len(instance.Status.States) != 1 || instance.Status.States[0].Message != "Deployment does not have minimum availability." {
+		t.Fatalf("states = %#v", instance.Status.States)
+	}
+}
+
 func TestComputeRuntimePhaseUsesStatesBeforeResourceKind(t *testing.T) {
 	tests := []struct {
 		name      string
 		resources []appsv1.ManagedResource
 		states    []appsv1.State
 		want      appsv1.Phase
+		wantMsg   string
 	}{
 		{name: "no states is installed", resources: []appsv1.ManagedResource{{APIVersion: "apps/v1", Kind: "Deployment"}}, want: appsv1.PhaseInstalled},
 		{name: "custom resource state is evaluated", resources: []appsv1.ManagedResource{{APIVersion: "example.io/v1", Kind: "Database"}}, states: []appsv1.State{{Name: "db", Status: apps.StateStatusRunning}}, want: appsv1.PhaseHealthy},
 		{name: "mixed jobs and workloads are evaluated", resources: []appsv1.ManagedResource{{APIVersion: "batch/v1", Kind: "Job"}, {APIVersion: "apps/v1", Kind: "Deployment"}}, states: []appsv1.State{{Name: "web", Status: apps.StateStatusRunning}}, want: appsv1.PhaseHealthy},
-		{name: "workload pending is degraded", resources: []appsv1.ManagedResource{{APIVersion: "apps/v1", Kind: "Deployment"}}, states: []appsv1.State{{Name: "web", Status: apps.StateStatusPending}}, want: appsv1.PhaseDegraded},
+		{name: "workload pending is degraded without an error message", resources: []appsv1.ManagedResource{{APIVersion: "apps/v1", Kind: "Deployment"}}, states: []appsv1.State{{Name: "web", Status: apps.StateStatusPending, Message: "Deployment does not have minimum availability."}}, want: appsv1.PhaseDegraded},
+		{name: "workload failure includes its error message", resources: []appsv1.ManagedResource{{APIVersion: "apps/v1", Kind: "Deployment"}}, states: []appsv1.State{{Name: "web", Status: apps.StateStatusUnhealthy, Message: "Failed to create replica set."}}, want: appsv1.PhaseUnhealthy, wantMsg: "Failed to create replica set."},
 		{name: "unknown status is degraded", resources: []appsv1.ManagedResource{{APIVersion: "apps/v1", Kind: "Deployment"}}, states: []appsv1.State{{Name: "web", Status: "Starting"}}, want: appsv1.PhaseDegraded},
 		{name: "unknown job status is degraded", resources: []appsv1.ManagedResource{{APIVersion: "batch/v1", Kind: "Job"}}, states: []appsv1.State{{Name: "job", Status: "Starting"}}, want: appsv1.PhaseDegraded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			phase, _, _ := computeRuntimePhase(tt.resources, tt.states)
+			phase, _, message := computeRuntimePhase(tt.resources, tt.states)
 			if phase != tt.want {
 				t.Fatalf("phase = %q, want %q", phase, tt.want)
+			}
+			if message != tt.wantMsg {
+				t.Fatalf("message = %q, want %q", message, tt.wantMsg)
 			}
 		})
 	}
