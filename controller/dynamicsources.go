@@ -27,8 +27,10 @@ type DynamicSources struct {
 	eventHandler handler.TypedEventHandler[client.Object, reconcile.Request]
 	predicates   []predicate.TypedPredicate[client.Object]
 
-	// queue is captured from Start
-	queue workqueue.TypedRateLimitingInterface[reconcile.Request]
+	// queue and controllerContext are captured from Start and shared by all
+	// dynamically registered watches.
+	queue             workqueue.TypedRateLimitingInterface[reconcile.Request]
+	controllerContext context.Context
 }
 
 func NewDynamicSources(
@@ -45,7 +47,7 @@ func NewDynamicSources(
 }
 
 func (d *DynamicSources) Start(
-	_ context.Context,
+	ctx context.Context,
 	q workqueue.TypedRateLimitingInterface[reconcile.Request],
 ) error {
 	d.watchedMutex.Lock()
@@ -53,6 +55,7 @@ func (d *DynamicSources) Start(
 	if d.queue != nil {
 		return nil
 	}
+	d.controllerContext = ctx
 	d.queue = q
 	return nil
 }
@@ -65,7 +68,7 @@ func (d *DynamicSources) Watch(ctx context.Context, gvk schema.GroupVersionKind)
 	if d.watchedKinds[gvk] {
 		return nil
 	}
-	if d.queue == nil {
+	if d.queue == nil || d.controllerContext == nil {
 		return fmt.Errorf("DynamicSources not started yet")
 	}
 
@@ -78,7 +81,7 @@ func (d *DynamicSources) Watch(ctx context.Context, gvk schema.GroupVersionKind)
 
 	src := source.TypedKind[client.Object](d.Cache, u, d.eventHandler, d.predicates...)
 
-	if err := src.Start(ctx, d.queue); err != nil {
+	if err := src.Start(d.controllerContext, d.queue); err != nil {
 		return fmt.Errorf("failed to start watch for %s: %w", gvk.String(), err)
 	}
 

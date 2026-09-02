@@ -247,7 +247,10 @@ deactivation to that case.
 
 Managed resource events return to the owning Instance through the enforced
 identity label. Watches are registered by GroupVersionKind and use metadata-only
-cache objects; Pods are watched directly because scale status depends on them.
+cache objects. Dynamically registered watches use the controller lifecycle
+context, so completing the reconciliation that first discovered a resource kind
+does not stop later events from that kind. Pods are watched directly because
+scale status depends on them.
 
 Runtime phase is derived from observed workload states, except that an explicit
 pause always projects `Paused`. Expression failures have their own condition and
