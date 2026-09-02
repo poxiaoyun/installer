@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
@@ -278,6 +279,121 @@ func TestDependencyEventRequestsOnlyDependentsPendingInstallation(t *testing.T) 
 	want := []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(dependent)}}
 	if !reflect.DeepEqual(requests, want) {
 		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+}
+
+func TestManagedResourceEventsRequestInstalledParentsByFullIdentity(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+	installedCondition := []metav1.Condition{{
+		Type:   appsv1.ConditionInstalled,
+		Status: metav1.ConditionTrue,
+	}}
+	parents := []*appsv1.Instance{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: "rune-system"},
+			Status: appsv1.InstanceStatus{
+				Conditions: installedCondition,
+				Resources: []appsv1.ManagedResource{{
+					APIVersion: appsv1.GroupVersion.String(),
+					Kind:       "Instance",
+					Namespace:  "volcano-system",
+					Name:       "volcano",
+				}},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster-policy", Namespace: "platform-system"},
+			Status: appsv1.InstanceStatus{
+				Conditions: installedCondition,
+				Resources: []appsv1.ManagedResource{{
+					APIVersion: "rbac.authorization.k8s.io/v1",
+					Kind:       "ClusterRole",
+					Name:       "shared-policy",
+				}},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "same-name-other-kind", Namespace: "rune-system"},
+			Status: appsv1.InstanceStatus{
+				Conditions: installedCondition,
+				Resources: []appsv1.ManagedResource{{
+					APIVersion: "v1",
+					Kind:       "ConfigMap",
+					Namespace:  "volcano-system",
+					Name:       "volcano",
+				}},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "not-installed", Namespace: "rune-system"},
+			Status: appsv1.InstanceStatus{Resources: []appsv1.ManagedResource{{
+				APIVersion: appsv1.GroupVersion.String(),
+				Kind:       "Instance",
+				Namespace:  "volcano-system",
+				Name:       "volcano",
+			}}},
+		},
+	}
+	objects := make([]client.Object, len(parents))
+	for i := range parents {
+		objects[i] = parents[i]
+	}
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithIndex(&appsv1.Instance{}, managedResourceIndexField, managedResourceIndexValues).
+		WithObjects(objects...).
+		Build()
+	handler := managedResourceEventHandler{Client: cli}
+
+	tests := []struct {
+		name      string
+		gvk       schema.GroupVersionKind
+		namespace string
+		resource  string
+		want      []reconcile.Request
+	}{
+		{
+			name:      "cross namespace child Instance",
+			gvk:       appsv1.GroupVersion.WithKind("Instance"),
+			namespace: "volcano-system",
+			resource:  "volcano",
+			want:      []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(parents[0])}},
+		},
+		{
+			name:     "cluster scoped resource",
+			gvk:      schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
+			resource: "shared-policy",
+			want:     []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(parents[1])}},
+		},
+		{
+			name:      "core resource with an empty API group",
+			gvk:       corev1.SchemeGroupVersion.WithKind("ConfigMap"),
+			namespace: "volcano-system",
+			resource:  "volcano",
+			want:      []reconcile.Request{{NamespacedName: client.ObjectKeyFromObject(parents[2])}},
+		},
+		{
+			name:      "same name and namespace with another GVK",
+			gvk:       corev1.SchemeGroupVersion.WithKind("Secret"),
+			namespace: "volcano-system",
+			resource:  "volcano",
+			want:      []reconcile.Request{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resource := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
+				Name:      tt.resource,
+				Namespace: tt.namespace,
+			}}
+			requests := handler.requestsFor(t.Context(), tt.gvk, resource)
+			if !reflect.DeepEqual(requests, tt.want) {
+				t.Fatalf("requests = %#v, want %#v", requests, tt.want)
+			}
+		})
 	}
 }
 

@@ -42,15 +42,19 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 	if err := mgr.GetFieldIndexer().IndexField(ctx, &appsv1.Instance{}, instanceDependencyIndexField, instanceDependencyIndexValues); err != nil {
 		return fmt.Errorf("index Instance dependencies: %w", err)
 	}
+	if err := mgr.GetFieldIndexer().IndexField(ctx, &appsv1.Instance{}, managedResourceIndexField, managedResourceIndexValues); err != nil {
+		return fmt.Errorf("index managed resource identities: %w", err)
+	}
 	allowNS := make(map[string]struct{}, len(options.AllowClusterScopedNamespaces))
 	for _, ns := range options.AllowClusterScopedNamespaces {
 		allowNS[ns] = struct{}{}
 	}
 
-	runtimeResourceEventMapper := DynamicWatchEventHandler{Client: cli}
+	managedResourceEventMapper := managedResourceEventHandler{Client: cli}
 	dynamicSources := NewDynamicSources(mgr.GetCache(),
-		runtimeResourceEventMapper.Handler(),
+		managedResourceEventMapper.Handler,
 		predicate.ResourceVersionChangedPredicate{})
+	podEventMapper := podEventHandler{Client: cli}
 
 	r := &InstanceReconciler{
 		Client:                       cli,
@@ -72,7 +76,7 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 			source.TypedKind(mgr.GetCache(), &corev1.Secret{}, ValueFromEventHandler[*corev1.Secret](cli, "Secret")),
 		).
 		WatchesRawSource(
-			source.TypedKind(mgr.GetCache(), &corev1.Pod{}, typedDynamicWatchEventHandler[*corev1.Pod](runtimeResourceEventMapper)),
+			source.TypedKind(mgr.GetCache(), &corev1.Pod{}, podEventMapper.Handler()),
 		).
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &appsv1.Instance{}, dependencyEventHandler{Client: cli}.Handler()),
@@ -83,6 +87,7 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 
 const (
 	instanceDependencyIndexField = "spec.dependencies.instance"
+	managedResourceIndexField    = "status.resources.identity"
 	dependencyRequeueAfter       = time.Minute
 )
 
@@ -125,26 +130,75 @@ func instanceDependencyIndexValues(object client.Object) []string {
 	return dependencies
 }
 
-type DynamicWatchEventHandler struct {
+func managedResourceIndexValues(object client.Object) []string {
+	instance := object.(*appsv1.Instance)
+	identities := make([]string, 0, len(instance.Status.Resources))
+	for _, resource := range instance.Status.Resources {
+		// status.resources is the authoritative inventory shared by every
+		// installer mode, so routing does not depend on adapter metadata.
+		identities = append(identities, managedResourceIdentity(
+			resource.GroupVersionKind(),
+			resource.Namespace,
+			resource.Name,
+		))
+	}
+	return identities
+}
+
+func managedResourceIdentity(gvk schema.GroupVersionKind, namespace, name string) string {
+	// All Kubernetes identifier components exclude '/', making this an
+	// unambiguous exact-match cache key. Namespace remains empty for
+	// cluster-scoped resources.
+	return strings.Join([]string{gvk.Group, gvk.Version, gvk.Kind, namespace, name}, "/")
+}
+
+// managedResourceEventHandler routes a direct managed-resource event through
+// the owning Instance inventory instead of trusting mutable resource labels or
+// assuming that the resource and Instance share a namespace.
+type managedResourceEventHandler struct {
 	Client client.Client
 }
 
-func (d DynamicWatchEventHandler) Handler() handler.TypedEventHandler[client.Object, reconcile.Request] {
+func (d managedResourceEventHandler) Handler(gvk schema.GroupVersionKind) handler.TypedEventHandler[client.Object, reconcile.Request] {
+	// Capture the GVK supplied by DynamicSources; the metadata object delivered
+	// by an informer is not the authority for which GVK was watched.
 	return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
-		return d.requestsFor(ctx, obj)
+		return d.requestsFor(ctx, gvk, obj)
 	})
 }
 
-func typedDynamicWatchEventHandler[T client.Object](d DynamicWatchEventHandler) handler.TypedEventHandler[T, reconcile.Request] {
-	return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj T) []reconcile.Request {
-		return d.requestsFor(ctx, obj)
-	})
-}
-
-func (d DynamicWatchEventHandler) requestsFor(ctx context.Context, obj client.Object) []reconcile.Request {
-	if obj.GetNamespace() == "" {
+func (d managedResourceEventHandler) requestsFor(ctx context.Context, gvk schema.GroupVersionKind, obj client.Object) []reconcile.Request {
+	identity := managedResourceIdentity(gvk, obj.GetNamespace(), obj.GetName())
+	instances := &appsv1.InstanceList{}
+	if err := d.Client.List(ctx, instances, client.MatchingFields{managedResourceIndexField: identity}); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "list Instances observing managed resource", "resource", identity)
 		return nil
 	}
+
+	requests := make([]reconcile.Request, 0, len(instances.Items))
+	for i := range instances.Items {
+		if !meta.IsStatusConditionTrue(instances.Items[i].Status.Conditions, appsv1.ConditionInstalled) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&instances.Items[i])})
+	}
+	return requests
+}
+
+// podEventHandler is separate from managed-resource routing because Pods made
+// by Deployments and StatefulSets are not direct status.resources entries but
+// still affect the Instance scale observation.
+type podEventHandler struct {
+	Client client.Client
+}
+
+func (d podEventHandler) Handler() handler.TypedEventHandler[*corev1.Pod, reconcile.Request] {
+	return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, obj *corev1.Pod) []reconcile.Request {
+		return d.requestsFor(ctx, obj)
+	})
+}
+
+func (d podEventHandler) requestsFor(ctx context.Context, obj *corev1.Pod) []reconcile.Request {
 	labels := obj.GetLabels()
 	if labels == nil {
 		return nil

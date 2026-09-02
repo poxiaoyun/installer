@@ -35,7 +35,7 @@ count, and conditions describe later observations of the managed resources.
 | `install/helm` | Helm release lifecycle | `Installer` adapter |
 | `install/native` | Resource inventory diff and direct Kubernetes apply/remove | `Installer` adapter used by Kustomize and Template modes |
 | `controller/instance-status.go` | Runtime phase, conditions, states, endpoints, summary, and scale observation | Instance status |
-| `controller/dynamicsources.go` | Reconciliation events from managed resource kinds | Instance identity label |
+| `controller/dynamicsources.go` | Reconciliation events from managed resource kinds | Managed resource identity index |
 
 The controller is the orchestration owner. Installation adapters do not infer
 Instance policy, and the controller does not reproduce Helm or native apply
@@ -165,7 +165,7 @@ Helm, Kustomize, and Template modes converge before resources reach Kubernetes:
 
 RawManifest resources pass through the same permission, identity, pause, and
 lifecycle rules as source-rendered resources. The Instance identity label is
-installer-owned because status selection and dynamic event routing depend on
+installer-owned because status selection and Pod scale observation depend on
 it; extensions cannot opt out of it.
 
 Namespace-scoped resources default to the Instance namespace. Cross-namespace
@@ -245,12 +245,16 @@ deactivation to that case.
 
 ## Runtime observation
 
-Managed resource events return to the owning Instance through the enforced
-identity label. Watches are registered by GroupVersionKind and use metadata-only
-cache objects. Dynamically registered watches use the controller lifecycle
-context, so completing the reconciliation that first discovered a resource kind
-does not stop later events from that kind. Pods are watched directly because
-scale status depends on them.
+Managed resource events return to every observing Instance through an index of
+the complete identities recorded in `status.resources`: GroupVersionKind,
+namespace, and name. Event routing therefore works independently of the
+resource's scope, namespace, source mode, and mutable metadata. Watches are
+registered by GroupVersionKind and use metadata-only cache objects. Dynamically
+registered watches use the controller lifecycle context, so completing the
+reconciliation that first discovered a resource kind does not stop later events
+from that kind. Pods are also watched directly by Instance identity label because
+scale observation includes Pods created by managed workloads that are not
+themselves recorded in `status.resources`.
 
 Runtime phase is derived from observed workload states, except that an explicit
 pause always projects `Paused`. Expression failures have their own condition and

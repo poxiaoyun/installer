@@ -9,14 +9,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"xiaoshiai.cn/installer/apis/apps"
-	appsv1 "xiaoshiai.cn/installer/apis/apps/v1"
 	"xiaoshiai.cn/installer/controller"
 )
 
@@ -24,19 +23,8 @@ var _ = Describe("Dynamic resource watches", func() {
 	It("keeps watching after the reconcile that registered the kind ends", func() {
 		watchScheme := runtime.NewScheme()
 		Expect(corev1.AddToScheme(watchScheme)).To(Succeed())
-		Expect(appsv1.AddToScheme(watchScheme)).To(Succeed())
-
-		parent := &appsv1.Instance{
-			ObjectMeta: metav1.ObjectMeta{Name: "dynamic-watch-parent", Namespace: "default"},
-			Status: appsv1.InstanceStatus{Conditions: []metav1.Condition{{
-				Type:   appsv1.ConditionInstalled,
-				Status: metav1.ConditionTrue,
-			}}},
-		}
-		reader := contextCheckingClient{Client: fake.NewClientBuilder().
-			WithScheme(watchScheme).
-			WithObjects(parent).
-			Build()}
+		parent := client.ObjectKey{Namespace: "default", Name: "dynamic-watch-parent"}
+		watchedGVK := corev1.SchemeGroupVersion.WithKind("ConfigMap")
 
 		watchCache, err := cache.New(cfg, cache.Options{Scheme: watchScheme})
 		Expect(err).NotTo(HaveOccurred())
@@ -57,19 +45,26 @@ var _ = Describe("Dynamic resource watches", func() {
 
 		sources := controller.NewDynamicSources(
 			watchCache,
-			(controller.DynamicWatchEventHandler{Client: reader}).Handler(),
+			func(gvk schema.GroupVersionKind) handler.TypedEventHandler[client.Object, reconcile.Request] {
+				Expect(gvk).To(Equal(watchedGVK))
+				return handler.TypedEnqueueRequestsFromMapFunc(func(eventCtx context.Context, _ client.Object) []reconcile.Request {
+					if eventCtx.Err() != nil {
+						return nil
+					}
+					return []reconcile.Request{{NamespacedName: parent}}
+				})
+			},
 			predicate.ResourceVersionChangedPredicate{},
 		)
 		Expect(sources.Start(controllerCtx, queue)).To(Succeed())
 
 		reconcileCtx, finishReconcile := context.WithCancel(controllerCtx)
-		Expect(sources.Watch(reconcileCtx, corev1.SchemeGroupVersion.WithKind("ConfigMap"))).To(Succeed())
+		Expect(sources.Watch(reconcileCtx, watchedGVK)).To(Succeed())
 
 		resource := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "dynamic-watch-resource",
 				Namespace: "default",
-				Labels:    map[string]string{apps.LabelInstance: parent.Name},
 			},
 			Data: map[string]string{"state": "reconciling"},
 		}
@@ -81,7 +76,7 @@ var _ = Describe("Dynamic resource watches", func() {
 		Expect(shutdown).To(BeFalse())
 		queue.Done(request)
 		queue.Forget(request)
-		Expect(request.NamespacedName).To(Equal(client.ObjectKeyFromObject(parent)))
+		Expect(request.NamespacedName).To(Equal(parent))
 
 		finishReconcile()
 		resource.Data["state"] = "healthy"
@@ -90,21 +85,3 @@ var _ = Describe("Dynamic resource watches", func() {
 		Eventually(queue.Len, 3*time.Second, 50*time.Millisecond).Should(Equal(1))
 	})
 })
-
-// contextCheckingClient models the real cached client boundary: reads issued
-// by an event handler must fail once the handler's context is cancelled.
-type contextCheckingClient struct {
-	client.Client
-}
-
-func (c contextCheckingClient) Get(
-	ctx context.Context,
-	key client.ObjectKey,
-	obj client.Object,
-	opts ...client.GetOption,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return c.Client.Get(ctx, key, obj, opts...)
-}
