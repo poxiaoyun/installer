@@ -11,6 +11,8 @@ const (
 	ReasonReady                      = "Ready"
 	ReasonExpressionEvaluationFailed = "ExpressionEvaluationFailed"
 	ReasonExpressionsReady           = "ExpressionsReady"
+	ReasonEndpointResolutionFailed   = "EndpointResolutionFailed"
+	ReasonEndpointsReady             = "EndpointsReady"
 	ReasonUninstallFailed            = "UninstallFailed"
 	ReasonDependencyNotReady         = "DependencyNotReady"
 	ReasonDependencyCheckFailed      = "DependencyCheckFailed"

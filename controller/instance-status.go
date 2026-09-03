@@ -459,10 +459,6 @@ func getPodState(resource *unstructured.Unstructured) appsv1.State {
 func GetDefaultEndpoints(ctx context.Context, cli client.Client, resources []*unstructured.Unstructured) []appsv1.Endpoint {
 	endpoints := []appsv1.Endpoint{}
 	for _, resource := range resources {
-		if resource.GetKind() == "Access" && resource.GetAPIVersion() == "ssh.xiaoshiai.cn/v1" {
-			endpoints = append(endpoints, getKubeSSHEndpoints(resource)...)
-			continue
-		}
 		if resource.GetKind() == "Ingress" && resource.GetAPIVersion() == networkingv1.SchemeGroupVersion.String() {
 			ingress := &networkingv1.Ingress{}
 			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, ingress); err != nil {
@@ -481,38 +477,6 @@ func GetDefaultEndpoints(ctx context.Context, cli client.Client, resources []*un
 		}
 	}
 	return normalizeEndpoints(endpoints)
-}
-
-func getKubeSSHEndpoints(access *unstructured.Unstructured) []appsv1.Endpoint {
-	addresses, found, err := unstructured.NestedSlice(access.Object, "status", "endpoints")
-	if err != nil || !found {
-		return nil
-	}
-	urls := make([]string, 0, len(addresses))
-	seen := map[string]struct{}{}
-	for _, item := range addresses {
-		endpoint, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		address, _ := endpoint["address"].(string)
-		username, _ := endpoint["username"].(string)
-		address, username = strings.TrimSpace(address), strings.TrimSpace(username)
-		if address == "" || username == "" {
-			continue
-		}
-		endpointURL := "ssh://" + username + "@" + address
-		if _, ok := seen[endpointURL]; ok {
-			continue
-		}
-		seen[endpointURL] = struct{}{}
-		urls = append(urls, endpointURL)
-	}
-	if len(urls) == 0 {
-		return nil
-	}
-	sort.Strings(urls)
-	return []appsv1.Endpoint{{Name: "SSH", URL: urls[0], URLs: urls, Kind: appsv1.EndpointKindExternal}}
 }
 
 func getIngressEndpointsWithClient(ctx context.Context, cli client.Client, ingress *networkingv1.Ingress) []appsv1.Endpoint {
@@ -737,7 +701,13 @@ func (r *InstanceReconciler) checkAnnotations(ctx context.Context, instance *app
 	// Preserve expression order and keep additional endpoints after the base
 	// result while removing exact duplicates. Default-discovered endpoints are
 	// already sorted by GetDefaultEndpoints.
-	instance.Status.Endpoints = resolveNodeIPEndpoints(ctx, r.Client, dedupeEndpoints(endpoints))
+	var endpointErr error
+	instance.Status.Endpoints, endpointErr = resolveNodeEndpoints(ctx, r.Client, dedupeEndpoints(endpoints))
+	if endpointErr != nil {
+		r.setCondition(instance, appsv1.ConditionEndpointsReady, metav1.ConditionFalse, ReasonEndpointResolutionFailed, endpointErr.Error())
+	} else {
+		r.setCondition(instance, appsv1.ConditionEndpointsReady, metav1.ConditionTrue, ReasonEndpointsReady, "Endpoint addresses observed successfully")
+	}
 
 	if statusexpression := annotations[apps.AnnotationStatesExpression]; statusexpression != "" {
 		states, err := checkStates(statusexpression, celdata)
@@ -763,12 +733,13 @@ func (r *InstanceReconciler) checkAnnotations(ctx context.Context, instance *app
 		instance.Status.Summary = nil
 	}
 
-	if err := errors.Join(expressionErrors...); err != nil {
-		r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionFalse, ReasonExpressionEvaluationFailed, err.Error())
-		return err
+	expressionErr := errors.Join(expressionErrors...)
+	if expressionErr != nil {
+		r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionFalse, ReasonExpressionEvaluationFailed, expressionErr.Error())
+	} else {
+		r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionTrue, ReasonExpressionsReady, "Configured expressions evaluated successfully")
 	}
-	r.setCondition(instance, appsv1.ConditionExpressionsReady, metav1.ConditionTrue, ReasonExpressionsReady, "Configured expressions evaluated successfully")
-	return nil
+	return errors.Join(expressionErr, endpointErr)
 }
 
 func checkStates(expr string, data CELData) ([]appsv1.State, error) {
@@ -905,55 +876,110 @@ func dedupeEndpoints(endpoints []appsv1.Endpoint) []appsv1.Endpoint {
 	return result
 }
 
-func resolveNodeIPEndpoints(ctx context.Context, cli client.Client, endpoints []appsv1.Endpoint) []appsv1.Endpoint {
-	needsNodeIPs := false
-	for _, endpoint := range endpoints {
-		if strings.Contains(endpoint.URL, NodeIPPlaceholder) {
-			needsNodeIPs = true
-			break
-		}
-	}
-	if !needsNodeIPs || cli == nil {
-		return endpoints
+func resolveNodeEndpoints(ctx context.Context, cli client.Client, endpoints []appsv1.Endpoint) ([]appsv1.Endpoint, error) {
+	if !hasNodeEndpointTemplate(endpoints) {
+		return endpoints, nil
 	}
 	nodes := &corev1.NodeList{}
-	if err := cli.List(ctx, nodes, client.MatchingLabels{apps.LabelExposeNodeIP: "true"}); err != nil {
-		logr.FromContextOrDiscard(ctx).Error(err, "list nodes to resolve endpoint URLs")
-		return endpoints
+	if err := cli.List(ctx, nodes); err != nil {
+		return resolveNodeEndpointTemplates(endpoints, nil), fmt.Errorf("list Nodes for endpoint addresses: %w", err)
 	}
+	return resolveNodeEndpointTemplates(endpoints, exposedNodeAddresses(nodes.Items)), nil
+}
+
+func hasNodeEndpointTemplate(endpoints []appsv1.Endpoint) bool {
+	for _, endpoint := range endpoints {
+		if strings.Contains(endpoint.URL, NodeIPPlaceholder) {
+			return true
+		}
+		for _, endpointURL := range endpoint.URLs {
+			if strings.Contains(endpointURL, NodeIPPlaceholder) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func exposedNodeAddresses(nodes []corev1.Node) []string {
+	hosts := map[string]struct{}{}
 	addresses := map[string]struct{}{}
-	for _, node := range nodes.Items {
+	for _, node := range nodes {
 		if !nodeReady(&node) {
 			continue
 		}
-		for _, address := range node.Status.Addresses {
-			if (address.Type == corev1.NodeInternalIP || address.Type == corev1.NodeExternalIP) && address.Address != "" {
-				addresses[address.Address] = struct{}{}
+		if host := node.Annotations[apps.AnnotationExposeNodeHost]; host != "" {
+			hosts[host] = struct{}{}
+		}
+		if node.Labels[apps.LabelExposeNodeIP] == "true" {
+			for _, address := range node.Status.Addresses {
+				if (address.Type == corev1.NodeInternalIP || address.Type == corev1.NodeExternalIP) && address.Address != "" {
+					addresses[address.Address] = struct{}{}
+				}
 			}
 		}
 	}
-	addressList := make([]string, 0, len(addresses))
-	for address := range addresses {
-		addressList = append(addressList, address)
+	hostList := make([]string, 0, len(hosts))
+	for host := range hosts {
+		hostList = append(hostList, host)
 	}
-	sort.Strings(addressList)
-	for idx := range endpoints {
-		if !strings.Contains(endpoints[idx].URL, NodeIPPlaceholder) {
+	sort.Strings(hostList)
+	addressList := make([]string, 0, len(hostList)+len(addresses))
+	addressList = append(addressList, hostList...)
+	ipAddresses := make([]string, 0, len(addresses))
+	for address := range addresses {
+		ipAddresses = append(ipAddresses, address)
+	}
+	sort.Strings(ipAddresses)
+	addressList = append(addressList, ipAddresses...)
+	return addressList
+}
+
+func resolveNodeEndpointTemplates(endpoints []appsv1.Endpoint, addresses []string) []appsv1.Endpoint {
+	result := make([]appsv1.Endpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		candidates := make([]string, 0, len(endpoint.URLs)+1)
+		candidates = append(candidates, endpoint.URL)
+		candidates = append(candidates, endpoint.URLs...)
+		containsTemplate := false
+		resolved := make([]string, 0, len(candidates)*len(addresses))
+		seen := map[string]struct{}{}
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			if !strings.Contains(candidate, NodeIPPlaceholder) {
+				if _, exists := seen[candidate]; !exists {
+					seen[candidate] = struct{}{}
+					resolved = append(resolved, candidate)
+				}
+				continue
+			}
+			containsTemplate = true
+			for _, address := range addresses {
+				replacement := address
+				if ip := net.ParseIP(address); ip != nil && strings.Contains(address, ":") {
+					replacement = "[" + address + "]"
+				}
+				resolvedURL := strings.ReplaceAll(candidate, NodeIPPlaceholder, replacement)
+				if _, exists := seen[resolvedURL]; exists {
+					continue
+				}
+				seen[resolvedURL] = struct{}{}
+				resolved = append(resolved, resolvedURL)
+			}
+		}
+		if !containsTemplate {
+			result = append(result, endpoint)
 			continue
 		}
-		endpoints[idx].URLs = make([]string, 0, len(addressList))
-		for _, address := range addressList {
-			replacement := address
-			if ip := net.ParseIP(address); ip != nil && strings.Contains(address, ":") {
-				replacement = "[" + address + "]"
-			}
-			endpoints[idx].URLs = append(endpoints[idx].URLs, strings.ReplaceAll(endpoints[idx].URL, NodeIPPlaceholder, replacement))
+		if len(resolved) == 0 {
+			resolved = nil
 		}
-		if len(endpoints[idx].URLs) == 0 {
-			endpoints[idx].URLs = nil
-		}
+		endpoint.URLs = resolved
+		result = append(result, endpoint)
 	}
-	return endpoints
+	return result
 }
 
 func nodeReady(node *corev1.Node) bool {

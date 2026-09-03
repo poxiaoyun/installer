@@ -416,10 +416,12 @@ spec:
                         and the endpoint.
                       type: string
                     url:
-                      description: URL is the primary URL for this endpoint
+                      description: URL is the original endpoint address and may contain
+                        an address template.
                       type: string
                     urls:
-                      description: URLs is multiple URLs for this endpoint
+                      description: URLs contains concrete addresses resolved from
+                        URL templates in preference order.
                       items:
                         type: string
                       type: array

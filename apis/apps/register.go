@@ -22,6 +22,7 @@ const (
 	AnnotationUpgradeStrategy               = "app.kubernetes.io/upgrade-strategy"
 	AnnotationRemoveStrategy                = "app.kubernetes.io/remove-strategy"
 	AnnotationIngressPorts                  = "cloud.xiaoshiai.cn/ingress-ports"
+	AnnotationExposeNodeHost                = "cloud.xiaoshiai.cn/expose-node-host"
 	AnnotationAllowClusterScoped            = GroupName + "/allow-cluster-scoped"
 )
 

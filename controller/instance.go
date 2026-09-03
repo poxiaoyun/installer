@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -55,6 +57,7 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 		managedResourceEventMapper.Handler,
 		predicate.ResourceVersionChangedPredicate{})
 	podEventMapper := podEventHandler{Client: cli}
+	nodeEventMapper := nodeEventHandler{Client: cli}
 
 	r := &InstanceReconciler{
 		Client:                       cli,
@@ -77,6 +80,18 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 		).
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &corev1.Pod{}, podEventMapper.Handler()),
+		).
+		WatchesRawSource(
+			source.TypedKind(
+				mgr.GetCache(),
+				&corev1.Node{},
+				nodeEventMapper.Handler(),
+				predicate.TypedFuncs[*corev1.Node]{
+					UpdateFunc: func(update event.TypedUpdateEvent[*corev1.Node]) bool {
+						return nodeEndpointObservationChanged(update.ObjectOld, update.ObjectNew)
+					},
+				},
+			),
 		).
 		WatchesRawSource(
 			source.TypedKind(mgr.GetCache(), &appsv1.Instance{}, dependencyEventHandler{Client: cli}.Handler()),
@@ -190,6 +205,50 @@ func (d managedResourceEventHandler) requestsFor(ctx context.Context, gvk schema
 // still affect the Instance scale observation.
 type podEventHandler struct {
 	Client client.Client
+}
+
+// nodeEventHandler refreshes installed Instances whose endpoint status retains
+// a Node address template when the exposed Node addresses change.
+type nodeEventHandler struct {
+	Client client.Client
+}
+
+func (d nodeEventHandler) Handler() handler.TypedEventHandler[*corev1.Node, reconcile.Request] {
+	return handler.TypedEnqueueRequestsFromMapFunc(func(ctx context.Context, _ *corev1.Node) []reconcile.Request {
+		return d.requestsFor(ctx)
+	})
+}
+
+func (d nodeEventHandler) requestsFor(ctx context.Context) []reconcile.Request {
+	instances := &appsv1.InstanceList{}
+	if err := d.Client.List(ctx, instances); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "list installed Instances for Node endpoint change")
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(instances.Items))
+	for i := range instances.Items {
+		if !meta.IsStatusConditionTrue(instances.Items[i].Status.Conditions, appsv1.ConditionInstalled) {
+			continue
+		}
+		if !hasNodeEndpointTemplate(instances.Items[i].Status.Endpoints) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&instances.Items[i])})
+	}
+	sort.Slice(requests, func(i, j int) bool {
+		if requests[i].Namespace != requests[j].Namespace {
+			return requests[i].Namespace < requests[j].Namespace
+		}
+		return requests[i].Name < requests[j].Name
+	})
+	return requests
+}
+
+func nodeEndpointObservationChanged(old, current *corev1.Node) bool {
+	oldAddresses := exposedNodeAddresses([]corev1.Node{*old})
+	currentAddresses := exposedNodeAddresses([]corev1.Node{*current})
+	return !reflect.DeepEqual(oldAddresses, currentAddresses)
 }
 
 func (d podEventHandler) Handler() handler.TypedEventHandler[*corev1.Pod, reconcile.Request] {

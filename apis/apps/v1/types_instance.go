@@ -341,9 +341,9 @@ type State struct {
 // Endpoint represents an access endpoint for the instance
 type Endpoint struct {
 	Name string `json:"name"`
-	// URL is the primary URL for this endpoint
+	// URL is the original endpoint address and may contain an address template.
 	URL string `json:"url"`
-	// URLs is multiple URLs for this endpoint
+	// URLs contains concrete addresses resolved from URL templates in preference order.
 	URLs []string `json:"urls,omitempty"`
 	// Kind of endpoint, e.g. Cluster, Internal, External
 	Kind EndpointKind `json:"kind"`
@@ -377,6 +377,8 @@ const (
 	ConditionReady = "Ready"
 	// ConditionExpressionsReady indicates whether configured status expressions evaluated successfully.
 	ConditionExpressionsReady = "ExpressionsReady"
+	// ConditionEndpointsReady indicates whether endpoint addresses were observed successfully.
+	ConditionEndpointsReady = "EndpointsReady"
 	// ConditionAutoscalingReady indicates whether the scale status can be observed safely.
 	ConditionAutoscalingReady = "AutoscalingReady"
 )

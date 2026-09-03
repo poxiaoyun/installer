@@ -104,6 +104,9 @@ func TestCheckAnnotationsUsesInstanceExpressions(t *testing.T) {
 	if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionExpressionsReady) {
 		t.Fatalf("conditions = %#v", instance.Status.Conditions)
 	}
+	if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionEndpointsReady) {
+		t.Fatalf("endpoint condition = %#v", meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionEndpointsReady))
+	}
 
 	instance.Annotations[apps.AnnotationSummaryExpression] = `{`
 	instance.Status.Summary = map[string]string{"stale": "value"}
@@ -519,15 +522,29 @@ func TestDefaultEndpoints(t *testing.T) {
 	}
 }
 
-func TestNodeIPEndpointExpansionAndSSHAccess(t *testing.T) {
+func TestNodeEndpointResolution(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "ready", Labels: map[string]string{apps.LabelExposeNodeIP: "true"}}, Status: corev1.NodeStatus{
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:        "ready",
+			Labels:      map[string]string{apps.LabelExposeNodeIP: "true"},
+			Annotations: map[string]string{apps.AnnotationExposeNodeHost: "node.example.com"},
+		}, Status: corev1.NodeStatus{
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
-			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}, {Type: corev1.NodeExternalIP, Address: "203.0.113.2"}},
+			Addresses: []corev1.NodeAddress{
+				{Type: corev1.NodeInternalIP, Address: "10.0.0.2"},
+				{Type: corev1.NodeExternalIP, Address: "203.0.113.2"},
+				{Type: corev1.NodeInternalIP, Address: "2001:db8::2"},
+			},
+		}},
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name:        "host-only",
+			Annotations: map[string]string{apps.AnnotationExposeNodeHost: "host-only.example.com"},
+		}, Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 		}},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "not-ready", Labels: map[string]string{apps.LabelExposeNodeIP: "true"}}, Status: corev1.NodeStatus{
 			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionFalse}},
@@ -538,27 +555,137 @@ func TestNodeIPEndpointExpansionAndSSHAccess(t *testing.T) {
 			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.4"}},
 		}},
 	).Build()
-	got := resolveNodeIPEndpoints(t.Context(), cli, []appsv1.Endpoint{{
+	got, err := resolveNodeEndpoints(t.Context(), cli, []appsv1.Endpoint{{
 		Name: "api", URL: "http://{NodeIP}:30080", Kind: appsv1.EndpointKindInternal,
 	}})
-	wantURLs := []string{"http://10.0.0.2:30080", "http://203.0.113.2:30080"}
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantURLs := []string{
+		"http://host-only.example.com:30080",
+		"http://node.example.com:30080",
+		"http://10.0.0.2:30080",
+		"http://[2001:db8::2]:30080",
+		"http://203.0.113.2:30080",
+	}
 	if !reflect.DeepEqual(got[0].URLs, wantURLs) {
 		t.Fatalf("node URLs = %#v, want %#v", got[0].URLs, wantURLs)
 	}
 	if got[0].URL != "http://{NodeIP}:30080" {
 		t.Fatalf("template URL changed to %q", got[0].URL)
 	}
+}
 
-	access := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "ssh.xiaoshiai.cn/v1",
-		"kind":       "Access",
+func TestCustomResourceEndpointsRequireExpression(t *testing.T) {
+	custom := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "example.test/v1",
+		"kind":       "RemoteAccess",
 		"status": map[string]any{"endpoints": []any{
-			map[string]any{"address": "ssh-b.example.com:22", "username": "demo"},
-			map[string]any{"address": "ssh-a.example.com:22", "username": "demo"},
+			map[string]any{"address": "{NodeIP}:2222", "username": "default.demo"},
+			map[string]any{"address": "[2001:db8::1]:22", "username": "default.demo"},
 		}},
 	}}
-	ssh := getKubeSSHEndpoints(access)
-	if len(ssh) != 1 || ssh[0].URL != "ssh://demo@ssh-a.example.com:22" || len(ssh[0].URLs) != 2 {
-		t.Fatalf("SSH endpoints = %#v", ssh)
+	if got := GetDefaultEndpoints(t.Context(), nil, []*unstructured.Unstructured{custom}); got != nil {
+		t.Fatalf("default endpoints = %#v, want nil for custom resource", got)
+	}
+
+	instance := &appsv1.Instance{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		apps.AnnotationAdditionalEndpointsExpression: `resources.filter(r,
+  r.apiVersion == "example.test/v1" &&
+  r.kind == "RemoteAccess" &&
+  has(r.status) &&
+  has(r.status.endpoints) &&
+  size(r.status.endpoints) > 0
+).map(r, {
+  "name": "SSH",
+  "url": "ssh://" + r.status.endpoints[0].username + "@" + r.status.endpoints[0].address,
+  "urls": r.status.endpoints.map(e, "ssh://" + e.username + "@" + e.address),
+		"kind": "External"
+})`,
+	}}}
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "worker",
+			Labels:      map[string]string{apps.LabelExposeNodeIP: "true"},
+			Annotations: map[string]string{apps.AnnotationExposeNodeHost: "node.example.com"},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
+		},
+	}).Build()
+	if err := (&InstanceReconciler{Client: cli}).checkAnnotations(t.Context(), instance, []*unstructured.Unstructured{custom}); err != nil {
+		t.Fatal(err)
+	}
+	want := []appsv1.Endpoint{{
+		Name: "SSH",
+		URL:  "ssh://default.demo@{NodeIP}:2222",
+		URLs: []string{
+			"ssh://default.demo@node.example.com:2222",
+			"ssh://default.demo@10.0.0.2:2222",
+			"ssh://default.demo@[2001:db8::1]:22",
+		},
+		Kind: appsv1.EndpointKindExternal,
+	}}
+	if !reflect.DeepEqual(instance.Status.Endpoints, want) {
+		t.Fatalf("expression endpoints = %#v, want %#v", instance.Status.Endpoints, want)
+	}
+}
+
+func TestNodeEndpointResolutionUsesDeclaredHostWithoutDNSValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "declared-host",
+			Labels:      map[string]string{apps.LabelExposeNodeIP: "true"},
+			Annotations: map[string]string{apps.AnnotationExposeNodeHost: "NODE.example.com"},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.5"}},
+		},
+	}).Build()
+
+	got, err := resolveNodeEndpoints(t.Context(), cli, []appsv1.Endpoint{{
+		Name: "api", URL: "http://{NodeIP}:30080", Kind: appsv1.EndpointKindInternal,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []appsv1.Endpoint{{
+		Name: "api", URL: "http://{NodeIP}:30080", URLs: []string{"http://NODE.example.com:30080", "http://10.0.0.5:30080"}, Kind: appsv1.EndpointKindInternal,
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("endpoints = %#v, want %#v", got, want)
+	}
+}
+
+func TestNodeEndpointResolutionKeepsUnresolvedTemplates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	got, err := resolveNodeEndpoints(t.Context(), cli, []appsv1.Endpoint{
+		{Name: "node", URL: "http://{NodeIP}:30080", Kind: appsv1.EndpointKindInternal},
+		{Name: "cluster", URL: "http://service.default:80", Kind: appsv1.EndpointKindCluster},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []appsv1.Endpoint{
+		{Name: "node", URL: "http://{NodeIP}:30080", Kind: appsv1.EndpointKindInternal},
+		{Name: "cluster", URL: "http://service.default:80", Kind: appsv1.EndpointKindCluster},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("endpoints = %#v, want %#v", got, want)
 	}
 }

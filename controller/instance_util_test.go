@@ -282,6 +282,76 @@ func TestDependencyEventRequestsOnlyDependentsPendingInstallation(t *testing.T) 
 	}
 }
 
+func TestNodeEventsRequestInstalledInstancesWithAddressTemplates(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+	installed := []*appsv1.Instance{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "apps"},
+			Status: appsv1.InstanceStatus{
+				Conditions: []metav1.Condition{{Type: appsv1.ConditionInstalled, Status: metav1.ConditionTrue}},
+				Endpoints:  []appsv1.Endpoint{{Name: "api", URL: "http://{NodeIP}:30080"}},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "data"},
+			Status: appsv1.InstanceStatus{Conditions: []metav1.Condition{{
+				Type: appsv1.ConditionInstalled, Status: metav1.ConditionTrue,
+			}}},
+		},
+	}
+	notInstalled := &appsv1.Instance{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "apps"}}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(installed[0], installed[1], notInstalled).Build()
+
+	requests := (&nodeEventHandler{Client: cli}).requestsFor(t.Context())
+	want := []reconcile.Request{
+		{NamespacedName: client.ObjectKeyFromObject(installed[0])},
+	}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+}
+
+func TestNodeEndpointObservationIgnoresHeartbeatAndDetectsAddressChanges(t *testing.T) {
+	old := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "worker",
+			Labels:      map[string]string{apps.LabelExposeNodeIP: "true"},
+			Annotations: map[string]string{apps.AnnotationExposeNodeHost: "worker.example.com"},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+			Addresses:  []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.2"}},
+		},
+	}
+	heartbeat := old.DeepCopy()
+	heartbeat.ResourceVersion = "2"
+	heartbeat.Status.Conditions[0].LastHeartbeatTime = metav1.Now()
+	if nodeEndpointObservationChanged(old, heartbeat) {
+		t.Fatal("heartbeat-only Node update changed endpoint observation")
+	}
+
+	changedHost := old.DeepCopy()
+	changedHost.Annotations[apps.AnnotationExposeNodeHost] = "new-worker.example.com"
+	if !nodeEndpointObservationChanged(old, changedHost) {
+		t.Fatal("Node host change did not change endpoint observation")
+	}
+
+	changedIP := old.DeepCopy()
+	changedIP.Status.Addresses[0].Address = "10.0.0.3"
+	if !nodeEndpointObservationChanged(old, changedIP) {
+		t.Fatal("Node IP change did not change endpoint observation")
+	}
+
+	notReady := old.DeepCopy()
+	notReady.Status.Conditions[0].Status = corev1.ConditionFalse
+	if !nodeEndpointObservationChanged(old, notReady) {
+		t.Fatal("Node readiness change did not change endpoint observation")
+	}
+}
+
 func TestManagedResourceEventsRequestInstalledParentsByFullIdentity(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := appsv1.AddToScheme(scheme); err != nil {

@@ -13,7 +13,7 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 - **Values from external sources**: reference ConfigMap / Secret via `spec.valuesFrom`
 - **Immutable source artifacts**: install source data from a same-namespace immutable Secret with SHA-256 verification
 - **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; scale status reports the current non-terminal Pods selected by the instance label plus the optional `app.kubernetes.io/scale-pod-selector` annotation; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet
-- **Workload status tracking**: endpoints, states, and summary are computed from managed resources with CEL expressions supplied through `Instance` annotations
+- **Workload status tracking**: endpoints, states, and summary are computed from managed resources with CEL expressions supplied through `Instance` annotations; NodePort endpoints preserve the original `{NodeIP}` template in `url` and publish concrete addresses in `urls` from Ready Nodes that opt in with `cloud.xiaoshiai.cn/expose-node-host=<host>`, `cloud.xiaoshiai.cn/expose-node-ip=true`, or both
 - **Lifecycle strategies**: per-resource upgrade `Retain` / `Recreate` and remove `Retain`
 
 ## Installation
