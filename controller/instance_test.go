@@ -185,7 +185,9 @@ spec:
 		Expect(deployment.Spec.Replicas).NotTo(BeNil())
 		Expect(*deployment.Spec.Replicas).To(Equal(int32(0)))
 		Expect(deployment.Labels).To(HaveKeyWithValue(apps.LabelInstance, instance.Name))
+		Expect(deployment.Labels).To(HaveKeyWithValue(apps.LabelInstanceNamespace, instance.Namespace))
 		Expect(deployment.Spec.Template.Labels).To(HaveKeyWithValue(apps.LabelInstance, instance.Name))
+		Expect(deployment.Spec.Template.Labels).To(HaveKeyWithValue(apps.LabelInstanceNamespace, instance.Namespace))
 
 		instance.Spec.Extensions = nil
 		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
@@ -235,7 +237,10 @@ var _ = Describe("Instance scale subresource", func() {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "scale-test-worker-1",
 				Namespace: "default",
-				Labels:    map[string]string{apps.LabelInstance: "scale-test"},
+				Labels: map[string]string{
+					apps.LabelInstance:          "scale-test",
+					apps.LabelInstanceNamespace: "default",
+				},
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "worker", Image: "example.invalid/worker"}}},
 		}
@@ -630,8 +635,12 @@ func TestImmediatePauseConvergesAfterResumeStatusConflict(t *testing.T) {
 	}
 	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
 
-	if _, err := reconciler.Reconcile(t.Context(), request); !apierrors.IsConflict(err) {
-		t.Fatalf("resume Reconcile() error = %v, want status conflict", err)
+	result, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("resume Reconcile() error = %v, want generation change to requeue without error", err)
+	}
+	if !result.Requeue {
+		t.Fatal("resume Reconcile() did not immediately requeue after generation changed")
 	}
 	if installer.appliedPaused {
 		t.Fatal("resume operation did not apply paused=false before the conflict")

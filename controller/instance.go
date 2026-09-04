@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -54,6 +55,7 @@ func Setup(ctx context.Context, mgr ctrl.Manager, options *Options) error {
 
 	r := &InstanceReconciler{
 		Client:                       cli,
+		APIReader:                    mgr.GetAPIReader(),
 		Scheme:                       mgr.GetScheme(),
 		Applier:                      delegate.NewDelegate(cfg, cli, &delegate.Options{CacheDir: options.CacheDir}),
 		DynamicSources:               dynamicSources,
@@ -85,6 +87,8 @@ const (
 	instanceDependencyIndexField = "spec.dependencies.instance"
 	dependencyRequeueAfter       = time.Minute
 )
+
+var errStatusGenerationChanged = errors.New("instance generation changed during status update")
 
 type dependencyEventHandler struct {
 	Client client.Client
@@ -142,9 +146,6 @@ func typedDynamicWatchEventHandler[T client.Object](d DynamicWatchEventHandler) 
 }
 
 func (d DynamicWatchEventHandler) requestsFor(ctx context.Context, obj client.Object) []reconcile.Request {
-	if obj.GetNamespace() == "" {
-		return nil
-	}
 	labels := obj.GetLabels()
 	if labels == nil {
 		return nil
@@ -153,7 +154,11 @@ func (d DynamicWatchEventHandler) requestsFor(ctx context.Context, obj client.Ob
 	if !ok {
 		return nil
 	}
-	key := client.ObjectKey{Namespace: obj.GetNamespace(), Name: instanceName}
+	instanceNamespace, ok := labels[apps.LabelInstanceNamespace]
+	if !ok {
+		return nil
+	}
+	key := client.ObjectKey{Namespace: instanceNamespace, Name: instanceName}
 	instance := &appsv1.Instance{}
 	if err := d.Client.Get(ctx, key, instance); err != nil {
 		logr.FromContextOrDiscard(ctx).Error(err, "get instance for dynamic watch event", "instance", key)
@@ -200,9 +205,10 @@ func ValueFromEventHandler[T client.Object](cli client.Client, kind string) hand
 }
 
 type InstanceReconciler struct {
-	Client  client.Client
-	Scheme  *runtime.Scheme
-	Applier install.Installer
+	Client    client.Client
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Applier   install.Installer
 
 	DynamicSources *DynamicSources
 
@@ -219,7 +225,11 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	instance := &appsv1.Instance{}
-	if err := r.Client.Get(ctx, req.NamespacedName, instance); err != nil {
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	if err := reader.Get(ctx, req.NamespacedName, instance); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -231,10 +241,13 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if instance.DeletionTimestamp != nil {
 		// remove
 		if err := r.Remove(ctx, instance); err != nil {
+			if errors.Is(err, errStatusGenerationChanged) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			instance.Status.Phase = appsv1.PhaseFailed
 			instance.Status.Message = err.Error()
 			r.setCondition(instance, appsv1.ConditionInstalled, metav1.ConditionFalse, ReasonUninstallFailed, err.Error())
-			_ = r.Client.Status().Update(ctx, instance)
+			_ = r.updateStatusWithRetry(ctx, instance)
 			return ctrl.Result{}, err
 		}
 
@@ -258,7 +271,10 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if instance.Status.Phase == "" || (instance.Status.ObservedGeneration > 0 && instance.Generation > instance.Status.ObservedGeneration) {
 		instance.Status.Phase = appsv1.PhaseReconciling
 		instance.Status.Message = ""
-		if err := r.Client.Status().Update(ctx, instance); err != nil {
+		if err := r.updateStatusWithRetry(ctx, instance); err != nil {
+			if errors.Is(err, errStatusGenerationChanged) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
@@ -278,7 +294,10 @@ func (r *InstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// update status if updated whenever the sync has error or not
 	if !equality.Semantic.DeepEqual(&original.Status, &instance.Status) {
-		if err := r.Client.Status().Update(ctx, instance); err != nil {
+		if err := r.updateStatusWithRetry(ctx, instance); err != nil {
+			if errors.Is(err, errStatusGenerationChanged) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, err
 		}
 	}
@@ -409,6 +428,37 @@ func (r *InstanceReconciler) setCondition(instance *appsv1.Instance, conditionTy
 	})
 }
 
+func (r *InstanceReconciler) updateStatusWithRetry(ctx context.Context, instance *appsv1.Instance) error {
+	desired := instance.DeepCopy()
+	if err := r.Client.Status().Update(ctx, instance); !apierrors.IsConflict(err) {
+		return err
+	}
+
+	desiredStatus := desired.Status
+	desiredGeneration := desired.Generation
+	key := client.ObjectKeyFromObject(desired)
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &appsv1.Instance{}
+		if err := reader.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		if latest.Generation != desiredGeneration {
+			return errStatusGenerationChanged
+		}
+		latest.Status = desiredStatus
+		if err := r.Client.Status().Update(ctx, latest); err != nil {
+			return err
+		}
+		instance.ResourceVersion = latest.ResourceVersion
+		instance.Status = latest.Status
+		return nil
+	})
+}
+
 func installerInstanceFrom(instance *appsv1.Instance, values map[string]any, auth *install.ResolvedAuth, tlsConfig *install.ResolvedTLS) install.Instance {
 	return install.Instance{
 		Name:              instance.Name,
@@ -469,8 +519,8 @@ func validateInstanceSource(instance *appsv1.Instance) error {
 }
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
-// The pipeline order is: Dashboard generation → ordered extensions → Namespace →
-// instance identity → Paused.
+// The pipeline order is: Dashboard generation → ordered extensions (including
+// platform scheduling) → Namespace → instance identity → Paused.
 func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
 	var modifiers []postrender.ObjectModifier
 
@@ -486,6 +536,10 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 			apps.ExtensionKindRawManifest: &postrender.RawManifestHandler{},
 		},
 	})
+	modifiers = append(modifiers, &postrender.SchedulingRenderer{
+		Extensions: instance.Spec.Extensions,
+		Handler:    &postrender.SchedulingHandler{},
+	})
 
 	// Namespace enforcement — validate scope and force namespace
 	allowClusterScoped := r.isClusterScopedAllowed(ctx, instance.Namespace)
@@ -498,7 +552,8 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 
 	// Instance identity is a platform invariant used by dynamic resource watches.
 	modifiers = append(modifiers, &postrender.InstanceIdentityRenderer{
-		InstanceName: instance.Name,
+		InstanceName:      instance.Name,
+		InstanceNamespace: instance.Namespace,
 	})
 
 	// Paused remains an independent control from the desired replica count.
@@ -714,13 +769,19 @@ func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1
 	// Instance replicas are platform-owned runtime values. global.paused is an
 	// independent chart value and must remain unchanged.
 	replicas := desiredInstanceReplicas(instance)
+	runtimeGlobal := map[string]any{
+		// Values are JSON-like and Helm persists numbers through JSON. Use
+		// the canonical decoded representation so release comparisons stay
+		// stable across storage round trips.
+		"replicas": float64(replicas),
+	}
+	schedulingValues, err := postrender.SchedulingValues(instance.Spec.Extensions)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Scheduling extension: %w", err)
+	}
+	runtimeGlobal["scheduling"] = schedulingValues
 	base = mergeMaps(base, map[string]any{
-		"global": map[string]any{
-			// Values are JSON-like and Helm persists numbers through JSON. Use
-			// the canonical decoded representation so release comparisons stay
-			// stable across storage round trips.
-			"replicas": float64(replicas),
-		},
+		"global": runtimeGlobal,
 	})
 	return base, nil
 }
@@ -950,7 +1011,7 @@ func (r *InstanceReconciler) Remove(ctx context.Context, instance *appsv1.Instan
 	if instance.Status.Phase != appsv1.PhaseTerminating {
 		instance.Status.Phase = appsv1.PhaseTerminating
 		instance.Status.Message = ""
-		if err := r.Client.Status().Update(ctx, instance); err != nil {
+		if err := r.updateStatusWithRetry(ctx, instance); err != nil {
 			return err
 		}
 	}

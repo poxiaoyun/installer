@@ -117,14 +117,15 @@ spec:
       chart: service
 `)
 
-	identity := &InstanceIdentityRenderer{InstanceName: "sample"}
+	identity := &InstanceIdentityRenderer{InstanceName: "sample", InstanceNamespace: "parent-system"}
 	if _, err := identity.ModifyObjects(objects); err != nil {
 		t.Fatalf("identity ModifyObjects() error = %v", err)
 	}
 	renderer := &CommonMetadataRenderer{
 		CommonLabels: map[string]string{
-			"team":             "platform",
-			apps.LabelInstance: "attempted-override",
+			"team":                      "platform",
+			apps.LabelInstance:          "attempted-override",
+			apps.LabelInstanceNamespace: "attempted-override",
 		},
 		CommonAnnotations: map[string]string{
 			"note":  "common",
@@ -140,6 +141,7 @@ spec:
 
 	for _, obj := range got {
 		assertStringMapValue(t, obj.GetLabels(), apps.LabelInstance, "sample", obj.GetKind()+" top-level labels")
+		assertStringMapValue(t, obj.GetLabels(), apps.LabelInstanceNamespace, "parent-system", obj.GetKind()+" top-level labels")
 		assertStringMapValue(t, obj.GetLabels(), "team", "platform", obj.GetKind()+" top-level labels")
 		assertStringMapValue(t, obj.GetAnnotations(), "note", "common", obj.GetKind()+" top-level annotations")
 		assertStringMapValue(t, obj.GetAnnotations(), "owner", "apps", obj.GetKind()+" top-level annotations")
@@ -156,6 +158,7 @@ spec:
 		labels := nestedStringMap(t, obj.Object, "spec", "template", "metadata", "labels")
 		annotations := nestedStringMap(t, obj.Object, "spec", "template", "metadata", "annotations")
 		assertStringMapValue(t, labels, apps.LabelInstance, "sample", name+" pod template labels")
+		assertStringMapValue(t, labels, apps.LabelInstanceNamespace, "parent-system", name+" pod template labels")
 		assertStringMapValue(t, labels, "team", "platform", name+" pod template labels")
 		assertStringMapValue(t, annotations, "owner", "apps", name+" pod template annotations")
 	}
@@ -164,6 +167,7 @@ spec:
 	cronLabels := nestedStringMap(t, cronjob.Object, "spec", "jobTemplate", "spec", "template", "metadata", "labels")
 	cronAnnotations := nestedStringMap(t, cronjob.Object, "spec", "jobTemplate", "spec", "template", "metadata", "annotations")
 	assertStringMapValue(t, cronLabels, apps.LabelInstance, "sample", "CronJob pod template labels")
+	assertStringMapValue(t, cronLabels, apps.LabelInstanceNamespace, "parent-system", "CronJob pod template labels")
 	assertStringMapValue(t, cronAnnotations, "owner", "apps", "CronJob pod template annotations")
 
 	for _, name := range []string{"deployment", "statefulset", "daemonset", "replicaset", "job"} {

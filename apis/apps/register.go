@@ -9,6 +9,8 @@ const (
 const (
 	// LabelInstance identifies resources and Pods that belong to an Instance.
 	LabelInstance = "app.kubernetes.io/instance"
+	// LabelInstanceNamespace identifies the namespace of the Instance that owns a resource.
+	LabelInstanceNamespace = GroupName + "/instance-namespace"
 	// LabelExposeNodeIP selects nodes whose IPs may be exposed in resolved endpoints.
 	LabelExposeNodeIP = "cloud.xiaoshiai.cn/expose-node-ip"
 )
@@ -23,15 +25,21 @@ const (
 	AnnotationRemoveStrategy                = "app.kubernetes.io/remove-strategy"
 	AnnotationIngressPorts                  = "cloud.xiaoshiai.cn/ingress-ports"
 	AnnotationAllowClusterScoped            = GroupName + "/allow-cluster-scoped"
+	// AnnotationSchedulingTarget marks a rendered workload as a platform scheduling target.
+	AnnotationSchedulingTarget = GroupName + "/scheduling-target"
 )
 
 const (
 	ExtensionKindCommonMetadata = "CommonMetadata"
 	ExtensionKindRawManifest    = "RawManifest"
+	ExtensionKindScheduling     = "Scheduling"
 
 	ExtensionParamManifest             = "manifest"
 	ExtensionParamPodTemplates         = "podTemplates"
 	ExtensionParamVolumeClaimTemplates = "volumeClaimTemplates"
+	ExtensionParamSchedulingMode       = "mode"
+	ExtensionParamSchedulingPriority   = "priority"
+	ExtensionParamGangMinCount         = "minCount"
 )
 
 const (

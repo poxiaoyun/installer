@@ -35,7 +35,7 @@ count, and conditions describe later observations of the managed resources.
 | `install/helm` | Helm release lifecycle | `Installer` adapter |
 | `install/native` | Resource inventory diff and direct Kubernetes apply/remove | `Installer` adapter used by Kustomize and Template modes |
 | `controller/instance-status.go` | Runtime phase, conditions, states, endpoints, summary, and scale observation | Instance status |
-| `controller/dynamicsources.go` | Reconciliation events from managed resource kinds | Instance identity label |
+| `controller/dynamicsources.go` | Reconciliation events from managed resource kinds | Instance name and namespace identity labels |
 
 The controller is the orchestration owner. Installation adapters do not infer
 Instance policy, and the controller does not reproduce Helm or native apply
@@ -158,20 +158,45 @@ Helm, Kustomize, and Template modes converge before resources reach Kubernetes:
 1. render the selected source;
 2. append chart-derived dashboard resources;
 3. execute declared extensions in order;
-4. enforce namespace and scope permissions;
-5. apply Instance identity to resources and Pod templates;
-6. apply pause behavior;
-7. validate and translate lifecycle policy in the installation adapter.
+4. project the optional Scheduling extension after all other extensions;
+5. enforce namespace and scope permissions;
+6. apply Instance identity to resources and Pod templates;
+7. apply pause behavior;
+8. validate and translate lifecycle policy in the installation adapter.
 
 RawManifest resources pass through the same permission, identity, pause, and
-lifecycle rules as source-rendered resources. The Instance identity label is
-installer-owned because status selection and dynamic event routing depend on
-it; extensions cannot opt out of it.
+lifecycle rules as source-rendered resources. The Instance name and namespace
+identity labels are installer-owned because status selection and dynamic event
+routing depend on them; extensions cannot opt out of or override them. Carrying
+both values lets cross-namespace and cluster-scoped resources route events back
+to their namespaced owner.
 
 Namespace-scoped resources default to the Instance namespace. Cross-namespace
 and cluster-scoped resources require authorization from the controller
 allow-list or the namespace annotation. Authorization is decided before apply,
 not delegated to individual source modes.
+
+Scheduling is an Instance delivery policy carried by one `Scheduling` extension.
+Its string parameters are constrained to `mode=default|volcano|gang`,
+`priority=default|low|medium|high`, and a positive `minCount` required only by
+Gang. Apps passes the extension through unchanged and presets retain it. The
+post-renderer maps low, medium, and high to `lower-priority`, `medium-priority`,
+and `high-priority`; Volcano and Gang select `schedulerName=volcano`, while
+default leaves the Kubernetes scheduler unspecified.
+
+The controller also injects the normalized profile as
+`global.scheduling.mode`, `global.scheduling.priority`, and, for Gang,
+`global.scheduling.minCount`. An Instance without the extension is injected as
+`default/default`, so an API client cannot accidentally enable Gang from a
+Chart default. Charts use that hidden value to render their own
+public PodGroup and top-level `scheduling.k8s.io/group-name` Workload references only
+for Gang mode. Charts identify scheduler and priority targets with
+`apps.xiaoshiai.cn/scheduling-target`; multi-workload charts must explicitly
+exclude auxiliary components. The renderer validates that every group reference
+resolves to a Chart-rendered public PodGroup, validates its positive Gang
+`minCount` equals the platform-injected value, and keeps Pod and PodGroup
+priorities equal. It never creates a PodGroup or emits Volcano-private group
+annotations.
 
 Inputs that affect rendered Helm manifests without appearing in values must be
 represented by the post-render identity. Changing such an input requires an
@@ -246,11 +271,18 @@ deactivation to that case.
 ## Runtime observation
 
 Managed resource events return to the owning Instance through the enforced
-identity label. Watches are registered by GroupVersionKind and use metadata-only
-cache objects. Dynamically registered watches use the controller lifecycle
-context, so completing the reconciliation that first discovered a resource kind
-does not stop later events from that kind. Pods are watched directly because
-scale status depends on them.
+identity name and namespace labels. Watches are registered by GroupVersionKind
+and use metadata-only cache objects. Dynamically registered watches use the
+controller lifecycle context, so completing the reconciliation that first
+discovered a resource kind does not stop later events from that kind. Pods are
+watched directly because scale status depends on them.
+
+Each reconciliation reads the Instance directly from the API server before any
+installation side effect, preventing an informer-cache lag from repeating a
+Helm or native apply. Status writes retry optimistic-lock conflicts after the
+same fresh read boundary. A retry only carries the desired status across when
+the generation is unchanged; a newer generation is requeued so stale status
+cannot be projected onto new desired configuration.
 
 Runtime phase is derived from observed workload states, except that an explicit
 pause always projects `Paused`. Expression failures have their own condition and

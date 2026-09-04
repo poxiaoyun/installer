@@ -50,6 +50,7 @@ func (r *CommonMetadataRenderer) ModifyObjects(objects []*unstructured.Unstructu
 	// Instance identity belongs to InstanceIdentityRenderer and cannot be
 	// overridden through global.commonLabels.
 	delete(labels, apps.LabelInstance)
+	delete(labels, apps.LabelInstanceNamespace)
 
 	for _, obj := range objects {
 		if len(labels) != 0 {
