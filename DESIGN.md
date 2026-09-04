@@ -78,16 +78,21 @@ Helm、Kustomize 和 Template 模式在资源进入 Kubernetes 前汇合：
 1. 渲染选中的来源；
 2. 追加从 Chart 派生的 dashboard 资源；
 3. 按顺序执行声明的 extensions；
-4. 强制执行 namespace 和 scope 权限；
-5. 为 Kustomize 和 Template 的直接资源写入 Instance 归属 annotations；Helm 资源使用 Helm release ownership metadata；
-6. 应用暂停行为；
-7. 在安装 adapter 中校验并转换生命周期策略。
+4. 在所有普通 extension 之后应用可选的 Scheduling extension；
+5. 强制执行 namespace 和 scope 权限；
+6. 为 Kustomize 和 Template 的直接资源写入 Instance 归属 annotations；Helm 资源使用 Helm release ownership metadata；
+7. 应用暂停行为；
+8. 在安装 adapter 中校验并转换生命周期策略。
 
 RawManifest 资源与来源渲染资源遵守相同的权限、归属、暂停和生命周期规则。Kustomize 和 Template 模式只在直接资源的顶层 metadata 写入 `apps.xiaoshiai.cn/instance-name` 和 `apps.xiaoshiai.cn/instance-namespace` annotations，不修改 Pod template、selector 或 Chart 自有 labels。这两个 annotation 是 native Instance 归属的保留键；渲染资源中已有的其他 Instance 归属会在安装前被拒绝。Helm 模式由 Helm adapter 写入 release ownership metadata。目标 Pod 的 `app.kubernetes.io/instance` label 属于 Application/Chart 运行时契约，Installer 不从直接资源向 Pod template 推导或覆盖它。
 
 命名空间资源默认进入 Instance namespace。跨 namespace 和 cluster-scoped 资源需要 controller allow-list 或 namespace annotation 授权。授权在 apply 前决定，不委托给各来源模式。
 
 凡是会影响 Helm 渲染 manifest、但不出现在 values 中的输入，都必须纳入 post-render identity。此类输入变化时必须改变 identity version，避免 Helm 错误复用旧 release。
+
+Scheduling 是由单个 `Scheduling` extension 承载的 Instance 交付策略。字符串参数只允许 `mode=default|volcano|gang`、`priority=default|low|medium|high`；仅 Gang 模式要求提供正整数 `minCount`。Apps 原样传递该 extension，preset 也会保留它。Post-renderer 将 low、medium 和 high 分别映射为 `lower-priority`、`medium-priority` 和 `high-priority`；Volcano 与 Gang 模式设置 `schedulerName=volcano`，default 模式不指定 Kubernetes scheduler。
+
+Controller 还会把规范化配置注入 `global.scheduling.mode`、`global.scheduling.priority`，并在 Gang 模式下注入 `global.scheduling.minCount`。没有该 extension 的 Instance 会显式注入 `default/default`，避免 API 客户端因 Chart 默认值而意外启用 Gang。Chart 只在 Gang 模式下使用这些隐藏 values 渲染自己的公共 PodGroup，以及 workload 顶层的 `scheduling.k8s.io/group-name` 引用。Chart 使用 `apps.xiaoshiai.cn/scheduling-target` 标识 scheduler 和 priority 的目标；包含多个 workload 的 Chart 必须显式排除辅助组件。Renderer 会校验每个 group 引用都能解析到 Chart 渲染的公共 PodGroup，其正整数 `minCount` 与平台注入值一致，并保持 Pod 与 PodGroup 的 priority 相同；它不会创建 PodGroup，也不会生成 Volcano 私有 group annotation。
 
 ## 运行时配置所有权
 
@@ -129,6 +134,8 @@ Lifecycle annotations 在所有模式中含义相同：
 ### 事件与状态
 
 受管资源事件通过 `status.resources` 中完整身份的索引返回给所有观察它的 Instance；完整身份包括 GroupVersionKind、namespace 和 name。因此，事件路由不依赖资源 scope、namespace、来源模式或可变 metadata。Watch 按 GroupVersionKind 注册，并使用 metadata-only cache 对象。动态注册的 watch 使用 controller lifecycle context，因此首次发现某资源种类的 reconcile 完成后，该种类之后的事件仍然有效。Pod 还会根据 Application/Chart 提供的运行时 Instance label 被直接 watch，因为 scale 观察包含由受管 workload 创建、但本身不记录在 `status.resources` 中的 Pod。
+
+每次 reconcile 都会在产生任何安装副作用之前直接从 API server 读取 Instance，避免 informer cache 延迟导致重复执行 Helm 或 native apply。Status 写入会在同一新鲜读取边界之后重试乐观锁冲突；仅当 generation 未变化时，重试才会携带期望 status。若出现更新的 generation，则重新入队，避免把过期 status 投影到新的期望配置。
 
 运行阶段从观察到的 workload states 推导，但显式暂停始终投影为 `Paused`。表达式失败有独立 condition，不覆盖独立计算的运行阶段。默认观察支持常见 workload states，以及 Kubernetes Service、Ingress、LoadBalancer 和 NodePort endpoints；CEL annotations 可以替换 states 或 endpoints，并追加 summary 或 additional endpoints。
 

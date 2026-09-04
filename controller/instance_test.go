@@ -633,8 +633,12 @@ func TestImmediatePauseConvergesAfterResumeStatusConflict(t *testing.T) {
 	}
 	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
 
-	if _, err := reconciler.Reconcile(t.Context(), request); !apierrors.IsConflict(err) {
-		t.Fatalf("resume Reconcile() error = %v, want status conflict", err)
+	result, err := reconciler.Reconcile(t.Context(), request)
+	if err != nil {
+		t.Fatalf("resume Reconcile() error = %v, want generation change to requeue without error", err)
+	}
+	if !result.Requeue {
+		t.Fatal("resume Reconcile() did not immediately requeue after generation changed")
 	}
 	if installer.appliedPaused {
 		t.Fatal("resume operation did not apply paused=false before the conflict")

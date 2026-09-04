@@ -8,12 +8,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"xiaoshiai.cn/installer/apis/apps"
@@ -143,6 +145,224 @@ func (c *countingInstaller) Template(context.Context, install.Instance) ([]byte,
 	return nil, nil
 }
 
+func TestReconcileRetriesStatusConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "status-conflict",
+			Namespace:  "default",
+			Generation: 1,
+			Finalizers: []string{apps.FinalizerName},
+		},
+		Spec: appsv1.InstanceSpec{
+			Kind: appsv1.InstanceKindHelm,
+			URL:  "oci://example.test/status-conflict",
+		},
+	}
+	conflictsRemaining := 1
+	statusUpdates := 0
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.Instance{}).
+		WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			instance,
+		).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(
+				ctx context.Context,
+				cli client.Client,
+				subResourceName string,
+				obj client.Object,
+				opts ...client.SubResourceUpdateOption,
+			) error {
+				if subResourceName == "status" {
+					statusUpdates++
+					if conflictsRemaining > 0 {
+						conflictsRemaining--
+						return apierrors.NewConflict(
+							schema.GroupResource{Group: apps.GroupName, Resource: "instances"},
+							obj.GetName(),
+							errors.New("injected status conflict"),
+						)
+					}
+				}
+				return cli.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := &InstanceReconciler{
+		Client:                       cli,
+		Scheme:                       scheme,
+		Applier:                      &countingInstaller{},
+		AllowClusterScopedNamespaces: map[string]struct{}{},
+	}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
+
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v, want conflict to be retried", err)
+	}
+	if statusUpdates < 2 {
+		t.Fatalf("status update attempts = %d, want at least 2", statusUpdates)
+	}
+	current := &appsv1.Instance{}
+	if err := cli.Get(t.Context(), request.NamespacedName, current); err != nil {
+		t.Fatalf("get reconciled Instance: %v", err)
+	}
+	if current.Status.ObservedGeneration != current.Generation {
+		t.Fatalf("observed generation = %d, want %d", current.Status.ObservedGeneration, current.Generation)
+	}
+}
+
+func TestDeletionReconcileRetriesTerminatingStatusConflict(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+
+	now := metav1.Now()
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "delete-status-conflict",
+			Namespace:         "default",
+			Generation:        1,
+			Finalizers:        []string{apps.FinalizerName},
+			DeletionTimestamp: &now,
+		},
+		Spec: appsv1.InstanceSpec{
+			Kind: appsv1.InstanceKindHelm,
+			URL:  "oci://example.test/delete-status-conflict",
+		},
+	}
+	conflictsRemaining := 1
+	statusUpdates := 0
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.Instance{}).
+		WithObjects(instance).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(
+				ctx context.Context,
+				cli client.Client,
+				subResourceName string,
+				obj client.Object,
+				opts ...client.SubResourceUpdateOption,
+			) error {
+				if subResourceName == "status" {
+					statusUpdates++
+					if conflictsRemaining > 0 {
+						conflictsRemaining--
+						return apierrors.NewConflict(
+							schema.GroupResource{Group: apps.GroupName, Resource: "instances"},
+							obj.GetName(),
+							errors.New("injected terminating status conflict"),
+						)
+					}
+				}
+				return cli.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	reconciler := &InstanceReconciler{
+		Client:                       cli,
+		Scheme:                       scheme,
+		Applier:                      &countingInstaller{},
+		AllowClusterScopedNamespaces: map[string]struct{}{},
+	}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
+
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("deletion Reconcile() error = %v, want conflict to be retried", err)
+	}
+	if statusUpdates < 2 {
+		t.Fatalf("terminating status update attempts = %d, want at least 2", statusUpdates)
+	}
+}
+
+func TestReconcileReadsLatestInstanceBeforeApplying(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add apps scheme: %v", err)
+	}
+
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "fresh-read",
+			Namespace:  "default",
+			Generation: 1,
+			Finalizers: []string{apps.FinalizerName},
+		},
+		Spec: appsv1.InstanceSpec{
+			Kind: appsv1.InstanceKindHelm,
+			URL:  "oci://example.test/fresh-read",
+		},
+	}
+	initialClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.Instance{}).
+		WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			instance,
+		).
+		Build()
+	initialReconciler := &InstanceReconciler{
+		Client:                       initialClient,
+		Scheme:                       scheme,
+		Applier:                      &countingInstaller{},
+		AllowClusterScopedNamespaces: map[string]struct{}{},
+	}
+	request := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(instance)}
+	if _, err := initialReconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("initial Reconcile() error = %v", err)
+	}
+	latest := &appsv1.Instance{}
+	if err := initialClient.Get(t.Context(), request.NamespacedName, latest); err != nil {
+		t.Fatalf("get latest Instance: %v", err)
+	}
+
+	stale := latest.DeepCopy()
+	stale.ResourceVersion = ""
+	stale.Status = appsv1.InstanceStatus{}
+	cachedClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&appsv1.Instance{}).
+		WithObjects(
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}},
+			stale,
+		).
+		Build()
+	latest.ResourceVersion = ""
+	directReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(latest).Build()
+	applier := &countingInstaller{}
+	reconciler := &InstanceReconciler{
+		Client:                       cachedClient,
+		APIReader:                    directReader,
+		Scheme:                       scheme,
+		Applier:                      applier,
+		AllowClusterScopedNamespaces: map[string]struct{}{},
+	}
+
+	if _, err := reconciler.Reconcile(t.Context(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if applier.applyCount != 0 {
+		t.Fatalf("Apply() calls = %d, want 0 for an already installed latest Instance", applier.applyCount)
+	}
+}
+
 func TestMissingDependencyWaitsWithoutReconcileError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -218,7 +438,13 @@ func TestInstalledInstanceIgnoresUnreadyDependency(t *testing.T) {
 			ObservedGeneration: 1,
 			Phase:              appsv1.PhaseInstalled,
 			Values: appsv1.Values{Object: map[string]any{
-				"global": map[string]any{"replicas": float64(1)},
+				"global": map[string]any{
+					"replicas": float64(1),
+					"scheduling": map[string]any{
+						"mode":     "default",
+						"priority": "default",
+					},
+				},
 			}},
 			Conditions: []metav1.Condition{{
 				Type:               appsv1.ConditionInstalled,
@@ -926,6 +1152,36 @@ func TestResolveValuesInjectsInstanceRuntimeValues(t *testing.T) {
 				t.Fatalf("global.keep = %q, want %q", got, tt.wantGlobalKeep)
 			}
 		})
+	}
+}
+
+func TestResolveValuesInjectsSchedulingForCharts(t *testing.T) {
+	instance := &appsv1.Instance{Spec: appsv1.InstanceSpec{
+		Extensions: []appsv1.Extension{{
+			Name: "platform-scheduling",
+			Kind: apps.ExtensionKindScheduling,
+			Params: map[string]string{
+				apps.ExtensionParamSchedulingMode:     "gang",
+				apps.ExtensionParamSchedulingPriority: "low",
+				apps.ExtensionParamGangMinCount:       "3",
+			},
+		}},
+	}}
+	values, err := (&InstanceReconciler{}).resolveValues(t.Context(), instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	global, ok := values["global"].(map[string]any)
+	if !ok {
+		t.Fatalf("global values = %#v", values["global"])
+	}
+	scheduling, ok := global["scheduling"].(map[string]any)
+	if !ok {
+		t.Fatalf("global.scheduling = %#v", global["scheduling"])
+	}
+	want := map[string]any{"mode": "gang", "priority": "low", "minCount": float64(3)}
+	if !reflect.DeepEqual(scheduling, want) {
+		t.Fatalf("global.scheduling = %#v, want %#v", scheduling, want)
 	}
 }
 
