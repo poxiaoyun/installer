@@ -5,14 +5,14 @@ A controller manage helm charts and kustomize in kubernetes operator way.
 ## Features
 
 - **Helm / Kustomize / Template** three deployment modes via `Instance` CR
-- **Post-rendering pipeline**: namespace enforcement, instance identity, opt-in extensions, pause control, lifecycle strategies, dashboard resources
+- **Post-rendering pipeline**: namespace enforcement, native resource membership, opt-in extensions, pause control, lifecycle strategies, dashboard resources
 - **Permission control**: cluster-scoped and cross-namespace resources are denied by default; allow per namespace via startup flag `--allow-cluster-scoped-namespaces` or annotation `apps.xiaoshiai.cn/allow-cluster-scoped: "true"`
-- **Common metadata extension**: explicitly injects `values.global.commonLabels` and `values.global.commonAnnotations` into resources and Pod templates; `app.kubernetes.io/instance` is always enforced independently
-- **Raw manifest extension**: append YAML or JSON Kubernetes objects through ordered `RawManifest` extensions; generated objects pass through the same namespace, identity, and pause enforcement
+- **Common metadata extension**: explicitly injects `values.global.commonLabels` and `values.global.commonAnnotations` into resources and Pod templates; the runtime `app.kubernetes.io/instance` label remains owned by the Application/Chart contract
+- **Raw manifest extension**: append YAML or JSON Kubernetes objects through ordered `RawManifest` extensions; generated objects pass through the same namespace, installation membership, and pause enforcement
 - **Dependency management**: `spec.dependencies` gates execution of a new Instance generation; unmet prerequisites project `Waiting`, dependency Instance updates wake dependents whose current generation has not installed successfully, and a periodic retry prevents lost events from blocking forever; later dependency health changes do not affect an already installed generation
 - **Values from external sources**: reference ConfigMap / Secret via `spec.valuesFrom`
 - **Immutable source artifacts**: install source data from a same-namespace immutable Secret with SHA-256 verification
-- **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; scale status reports the current non-terminal Pods selected by the instance label plus the optional `app.kubernetes.io/scale-pod-selector` annotation; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet
+- **Scale, pause, and resume**: `spec.replicas` is exposed through the Kubernetes scale subresource and injected as `values.global.replicas`; scale status reports the current non-terminal Pods carrying the Application/Chart-provided instance label plus the optional `app.kubernetes.io/scale-pod-selector` annotation; the independent `values.global.paused` control pauses Deployment, StatefulSet, Job, CronJob, and DaemonSet
 - **Workload status tracking**: endpoints, states, and summary are computed from managed resources with CEL expressions supplied through `Instance` annotations; NodePort endpoints preserve the original `{NodeIP}` template in `url` and publish concrete addresses in `urls` from Ready Nodes that opt in with `cloud.xiaoshiai.cn/expose-node-host=<host>`, `cloud.xiaoshiai.cn/expose-node-ip=true`, or both
 - **Lifecycle strategies**: per-resource upgrade `Retain` / `Recreate` and remove `Retain`
 
@@ -135,7 +135,13 @@ spec:
 
 The `manifest` parameter accepts a multi-document YAML or JSON stream. Extension
 entries execute in declaration order; their final objects then receive the
-instance namespace, identity labels, and pause handling.
+instance namespace, installation-mode ownership metadata, and pause handling.
+For Kustomize and Template Instances, direct resources receive
+`apps.xiaoshiai.cn/instance-name` and
+`apps.xiaoshiai.cn/instance-namespace` annotations. Helm resources retain
+Helm's release metadata. Neither path derives metadata for Pod templates. The
+native membership annotations are reserved; a rendered resource that names a
+different Instance is rejected before installation.
 
 Check the status of the helm instance
 

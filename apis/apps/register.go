@@ -7,7 +7,7 @@ const (
 )
 
 const (
-	// LabelInstance identifies resources and Pods that belong to an Instance.
+	// LabelInstance identifies runtime resources and Pods selected by an Instance.
 	LabelInstance = "app.kubernetes.io/instance"
 	// LabelExposeNodeIP selects nodes whose IPs may be exposed in resolved endpoints.
 	LabelExposeNodeIP = "cloud.xiaoshiai.cn/expose-node-ip"
@@ -24,6 +24,10 @@ const (
 	AnnotationIngressPorts                  = "cloud.xiaoshiai.cn/ingress-ports"
 	AnnotationExposeNodeHost                = "cloud.xiaoshiai.cn/expose-node-host"
 	AnnotationAllowClusterScoped            = GroupName + "/allow-cluster-scoped"
+	// AnnotationInstanceName identifies the owning native Instance by name.
+	AnnotationInstanceName = GroupName + "/instance-name"
+	// AnnotationInstanceNamespace identifies the owning native Instance by namespace.
+	AnnotationInstanceNamespace = GroupName + "/instance-namespace"
 )
 
 const (

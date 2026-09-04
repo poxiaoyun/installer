@@ -117,10 +117,6 @@ spec:
       chart: service
 `)
 
-	identity := &InstanceIdentityRenderer{InstanceName: "sample"}
-	if _, err := identity.ModifyObjects(objects); err != nil {
-		t.Fatalf("identity ModifyObjects() error = %v", err)
-	}
 	renderer := &CommonMetadataRenderer{
 		CommonLabels: map[string]string{
 			"team":             "platform",
@@ -139,7 +135,9 @@ spec:
 	}
 
 	for _, obj := range got {
-		assertStringMapValue(t, obj.GetLabels(), apps.LabelInstance, "sample", obj.GetKind()+" top-level labels")
+		if _, found := obj.GetLabels()[apps.LabelInstance]; found {
+			t.Errorf("%s top-level labels unexpectedly contain the reserved instance label", obj.GetKind())
+		}
 		assertStringMapValue(t, obj.GetLabels(), "team", "platform", obj.GetKind()+" top-level labels")
 		assertStringMapValue(t, obj.GetAnnotations(), "note", "common", obj.GetKind()+" top-level annotations")
 		assertStringMapValue(t, obj.GetAnnotations(), "owner", "apps", obj.GetKind()+" top-level annotations")
@@ -149,13 +147,17 @@ spec:
 	assertStringMapValue(t, config.GetLabels(), "chart", "original", "ConfigMap labels")
 
 	pod := objectByName(t, got, "pod")
-	assertStringMapValue(t, pod.GetLabels(), apps.LabelInstance, "sample", "Pod labels")
+	if _, found := pod.GetLabels()[apps.LabelInstance]; found {
+		t.Error("Pod labels unexpectedly contain the reserved instance label")
+	}
 
 	for _, name := range []string{"deployment", "statefulset", "daemonset", "replicaset", "job"} {
 		obj := objectByName(t, got, name)
 		labels := nestedStringMap(t, obj.Object, "spec", "template", "metadata", "labels")
 		annotations := nestedStringMap(t, obj.Object, "spec", "template", "metadata", "annotations")
-		assertStringMapValue(t, labels, apps.LabelInstance, "sample", name+" pod template labels")
+		if _, found := labels[apps.LabelInstance]; found {
+			t.Errorf("%s pod template labels unexpectedly contain the reserved instance label", name)
+		}
 		assertStringMapValue(t, labels, "team", "platform", name+" pod template labels")
 		assertStringMapValue(t, annotations, "owner", "apps", name+" pod template annotations")
 	}
@@ -163,7 +165,9 @@ spec:
 	cronjob := objectByName(t, got, "cronjob")
 	cronLabels := nestedStringMap(t, cronjob.Object, "spec", "jobTemplate", "spec", "template", "metadata", "labels")
 	cronAnnotations := nestedStringMap(t, cronjob.Object, "spec", "jobTemplate", "spec", "template", "metadata", "annotations")
-	assertStringMapValue(t, cronLabels, apps.LabelInstance, "sample", "CronJob pod template labels")
+	if _, found := cronLabels[apps.LabelInstance]; found {
+		t.Error("CronJob pod template labels unexpectedly contain the reserved instance label")
+	}
 	assertStringMapValue(t, cronAnnotations, "owner", "apps", "CronJob pod template annotations")
 
 	for _, name := range []string{"deployment", "statefulset", "daemonset", "replicaset", "job"} {
@@ -189,7 +193,7 @@ spec:
 	vctLabels := nestedStringMap(t, statefulset.Object, "spec", "volumeClaimTemplates", "0", "metadata", "labels")
 	vctAnnotations := nestedStringMap(t, statefulset.Object, "spec", "volumeClaimTemplates", "0", "metadata", "annotations")
 	if _, found := vctLabels[apps.LabelInstance]; found {
-		t.Error("volumeClaimTemplate unexpectedly received the instance identity label")
+		t.Error("volumeClaimTemplate unexpectedly received the reserved runtime instance label")
 	}
 	assertStringMapValue(t, vctLabels, "team", "platform", "volumeClaimTemplate labels")
 	assertStringMapValue(t, vctAnnotations, "owner", "apps", "volumeClaimTemplate annotations")

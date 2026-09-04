@@ -47,8 +47,8 @@ type CommonMetadataRenderer struct {
 func (r *CommonMetadataRenderer) ModifyObjects(objects []*unstructured.Unstructured) ([]*unstructured.Unstructured, error) {
 	labels := make(map[string]string, len(r.CommonLabels))
 	maps.Copy(labels, r.CommonLabels)
-	// Instance identity belongs to InstanceIdentityRenderer and cannot be
-	// overridden through global.commonLabels.
+	// The runtime Instance label belongs to the Application/Chart contract and
+	// cannot be supplied through the generic common metadata extension.
 	delete(labels, apps.LabelInstance)
 
 	for _, obj := range objects {

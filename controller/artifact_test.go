@@ -270,7 +270,9 @@ var _ = Describe("Chart Secret artifacts", func() {
 		Expect(k8sClient.Update(ctx, instance)).To(Succeed())
 		eventuallyInstalledArtifact(instance, digestV2, "0.1.0")
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(cm), cm)).To(Succeed())
-		Expect(cm.Labels[apps.LabelInstance]).To(Equal(instance.Name))
+		Expect(cm.Labels).NotTo(HaveKey(apps.LabelInstance))
+		Expect(cm.Annotations).To(HaveKeyWithValue("meta.helm.sh/release-name", instance.Name))
+		Expect(cm.Annotations).To(HaveKeyWithValue("meta.helm.sh/release-namespace", instance.Namespace))
 		releaseV3 := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "sh.helm.release.v1.artifact-demo.v3", Namespace: namespace}}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(releaseV3), releaseV3)).To(Succeed())
 

@@ -79,11 +79,11 @@ Helm、Kustomize 和 Template 模式在资源进入 Kubernetes 前汇合：
 2. 追加从 Chart 派生的 dashboard 资源；
 3. 按顺序执行声明的 extensions；
 4. 强制执行 namespace 和 scope 权限；
-5. 为资源和 Pod template 应用 Instance 身份；
+5. 为 Kustomize 和 Template 的直接资源写入 Instance 归属 annotations；Helm 资源使用 Helm release ownership metadata；
 6. 应用暂停行为；
 7. 在安装 adapter 中校验并转换生命周期策略。
 
-RawManifest 资源与来源渲染资源遵守相同的权限、身份、暂停和生命周期规则。Instance 身份 label 由 Installer 拥有，因为状态选择和 Pod scale 观察依赖它；extension 不能退出该约束。
+RawManifest 资源与来源渲染资源遵守相同的权限、归属、暂停和生命周期规则。Kustomize 和 Template 模式只在直接资源的顶层 metadata 写入 `apps.xiaoshiai.cn/instance-name` 和 `apps.xiaoshiai.cn/instance-namespace` annotations，不修改 Pod template、selector 或 Chart 自有 labels。这两个 annotation 是 native Instance 归属的保留键；渲染资源中已有的其他 Instance 归属会在安装前被拒绝。Helm 模式由 Helm adapter 写入 release ownership metadata。目标 Pod 的 `app.kubernetes.io/instance` label 属于 Application/Chart 运行时契约，Installer 不从直接资源向 Pod template 推导或覆盖它。
 
 命名空间资源默认进入 Instance namespace。跨 namespace 和 cluster-scoped 资源需要 controller allow-list 或 namespace annotation 授权。授权在 apply 前决定，不委托给各来源模式。
 
@@ -109,7 +109,7 @@ Lifecycle annotations 在所有模式中含义相同：
 
 ## Scale、暂停与受管 HPA
 
-`spec.replicas` 是 Instance 期望副本数，并通过 scale subresource 暴露。Controller 将其注入 `global.replicas`；Chart 决定哪个 workload 使用该值。Scale status 统计带 Instance 身份 label 的非终态 Pod，并在存在时叠加 scale Pod selector annotation。
+`spec.replicas` 是 Instance 期望副本数，并通过 scale subresource 暴露。Controller 将其注入 `global.replicas`；Chart 决定哪个 workload 使用该值，并保证目标 Pod 带有 `app.kubernetes.io/instance=<Instance.name>`。Scale status 统计带该运行时 label 的非终态 Pod，并在存在时叠加 scale Pod selector annotation。Installer 不通过 post-render 修改 Pod template 来建立这个契约。
 
 暂停只由 `global.paused` 控制：
 
@@ -128,7 +128,7 @@ Lifecycle annotations 在所有模式中含义相同：
 
 ### 事件与状态
 
-受管资源事件通过 `status.resources` 中完整身份的索引返回给所有观察它的 Instance；完整身份包括 GroupVersionKind、namespace 和 name。因此，事件路由不依赖资源 scope、namespace、来源模式或可变 metadata。Watch 按 GroupVersionKind 注册，并使用 metadata-only cache 对象。动态注册的 watch 使用 controller lifecycle context，因此首次发现某资源种类的 reconcile 完成后，该种类之后的事件仍然有效。Pod 还会根据 Instance 身份 label 被直接 watch，因为 scale 观察包含由受管 workload 创建、但本身不记录在 `status.resources` 中的 Pod。
+受管资源事件通过 `status.resources` 中完整身份的索引返回给所有观察它的 Instance；完整身份包括 GroupVersionKind、namespace 和 name。因此，事件路由不依赖资源 scope、namespace、来源模式或可变 metadata。Watch 按 GroupVersionKind 注册，并使用 metadata-only cache 对象。动态注册的 watch 使用 controller lifecycle context，因此首次发现某资源种类的 reconcile 完成后，该种类之后的事件仍然有效。Pod 还会根据 Application/Chart 提供的运行时 Instance label 被直接 watch，因为 scale 观察包含由受管 workload 创建、但本身不记录在 `status.resources` 中的 Pod。
 
 运行阶段从观察到的 workload states 推导，但显式暂停始终投影为 `Paused`。表达式失败有独立 condition，不覆盖独立计算的运行阶段。默认观察支持常见 workload states，以及 Kubernetes Service、Ingress、LoadBalancer 和 NodePort endpoints；CEL annotations 可以替换 states 或 endpoints，并追加 summary 或 additional endpoints。
 

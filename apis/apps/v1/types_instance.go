@@ -203,7 +203,7 @@ type InstanceStatus struct {
 	Replicas int32 `json:"replicas,omitempty"`
 
 	// Selector identifies the Pods represented by Replicas. It combines the
-	// instance identity label with any configured scale Pod selector and is
+	// Application-provided runtime instance label with any configured scale Pod selector and is
 	// exposed through the scale subresource.
 	Selector string `json:"selector,omitempty"`
 

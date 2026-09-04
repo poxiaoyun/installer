@@ -99,6 +99,8 @@ var _ = Describe("Basic Plugin tests", func() {
 		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "kustomize-test", Namespace: "default"}}
 		err = k8sClient.Get(ctx, client.ObjectKeyFromObject(cm), cm)
 		Expect(err).NotTo(HaveOccurred())
+		Expect(cm.Annotations).To(HaveKeyWithValue(apps.AnnotationInstanceName, plugin.Name))
+		Expect(cm.Annotations).To(HaveKeyWithValue(apps.AnnotationInstanceNamespace, plugin.Namespace))
 	})
 
 	It("create a remote kustomize plugin", Label("online"), func() {
@@ -184,8 +186,9 @@ spec:
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "raw-manifest-workload"}, deployment)).To(Succeed())
 		Expect(deployment.Spec.Replicas).NotTo(BeNil())
 		Expect(*deployment.Spec.Replicas).To(Equal(int32(0)))
-		Expect(deployment.Labels).To(HaveKeyWithValue(apps.LabelInstance, instance.Name))
-		Expect(deployment.Spec.Template.Labels).To(HaveKeyWithValue(apps.LabelInstance, instance.Name))
+		Expect(deployment.Annotations).To(HaveKeyWithValue("meta.helm.sh/release-name", instance.Name))
+		Expect(deployment.Annotations).To(HaveKeyWithValue("meta.helm.sh/release-namespace", instance.Namespace))
+		Expect(deployment.Spec.Template.Labels).NotTo(HaveKey(apps.LabelInstance))
 
 		instance.Spec.Extensions = nil
 		Expect(k8sClient.Update(ctx, instance)).To(Succeed())

@@ -583,7 +583,7 @@ func validateInstanceSource(instance *appsv1.Instance) error {
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
 // The pipeline order is: Dashboard generation → ordered extensions → Namespace →
-// instance identity → Paused.
+// native Instance membership → Paused.
 func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
 	var modifiers []postrender.ObjectModifier
 
@@ -609,10 +609,15 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 		RESTMapper:          r.Client.RESTMapper(),
 	})
 
-	// Instance identity is a platform invariant used by dynamic resource watches.
-	modifiers = append(modifiers, &postrender.InstanceIdentityRenderer{
-		InstanceName: instance.Name,
-	})
+	// Helm writes release ownership metadata itself. Native installers use
+	// equivalent platform annotations on direct resources without changing Pod
+	// templates or selectors owned by the rendered source.
+	if instance.Spec.Kind == appsv1.InstanceKindKustomize || instance.Spec.Kind == appsv1.InstanceKindTemplate {
+		modifiers = append(modifiers, &postrender.InstanceMembershipRenderer{
+			InstanceName:      instance.Name,
+			InstanceNamespace: instance.Namespace,
+		})
+	}
 
 	// Paused remains an independent control from the desired replica count.
 	paused := getGlobalPaused(values)

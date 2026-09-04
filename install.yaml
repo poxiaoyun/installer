@@ -461,8 +461,8 @@ spec:
                 type: array
               message:
                 description: |-
-                  Message is the message associated with the status
-                  Contains error message when phase is Failed, cleared on success.
+                  Message describes an installation or runtime failure. Expected progress
+                  states such as Waiting, Pending, Scaling, and Updating leave it empty.
                 type: string
               note:
                 description: Note contains the rendered notes from helm chart
@@ -500,7 +500,7 @@ spec:
               selector:
                 description: |-
                   Selector identifies the Pods represented by Replicas. It combines the
-                  instance identity label with any configured scale Pod selector and is
+                  Application-provided runtime instance label with any configured scale Pod selector and is
                   exposed through the scale subresource.
                 type: string
               states:
@@ -563,10 +563,10 @@ metadata:
   namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
-    helm.sh/chart: installer-1.1.0
+    helm.sh/chart: installer-1.2.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.2.0"
     app.kubernetes.io/component: installer
 ---
 # Source: installer/templates/rbac.yaml
@@ -576,10 +576,10 @@ metadata:
   name: installer
   labels:
     app.kubernetes.io/name: installer
-    helm.sh/chart: installer-1.1.0
+    helm.sh/chart: installer-1.2.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.2.0"
     app.kubernetes.io/component: installer
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -599,10 +599,10 @@ metadata:
   namespace: "rune-system"
   labels:
     app.kubernetes.io/name: installer
-    helm.sh/chart: installer-1.1.0
+    helm.sh/chart: installer-1.2.0
     app.kubernetes.io/instance: installer
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: "v1.1.0"
+    app.kubernetes.io/version: "v1.2.0"
     app.kubernetes.io/component: installer
 spec:
   replicas: 1
@@ -617,17 +617,17 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: installer
-        helm.sh/chart: installer-1.1.0
+        helm.sh/chart: installer-1.2.0
         app.kubernetes.io/instance: installer
         app.kubernetes.io/managed-by: Helm
-        app.kubernetes.io/version: "v1.1.0"
+        app.kubernetes.io/version: "v1.2.0"
         app.kubernetes.io/component: installer
     spec:
       serviceAccountName: installer
       
       containers:
         - name: installer
-          image: registry.cn-hangzhou.aliyuncs.com/xiaoshiai/installer:v1.1.0
+          image: registry.cn-hangzhou.aliyuncs.com/xiaoshiai/installer:v1.2.0
           imagePullPolicy: IfNotPresent
           args:
             - --leader-election
