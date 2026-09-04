@@ -47,17 +47,14 @@ type Options struct {
 func NewDefaultOptions() *Options {
 	home, _ := os.UserHomeDir()
 	return &Options{
-		MetricsAddr:           ":9090",
-		ProbeAddr:             ":8081",
-		LeaderElection:        false,
-		LeaderElectionID:      "installer-leader-election",
-		CacheDir:              filepath.Join(home, ".cache", "installer"),
-		Concurrency:           5,
-		ReconciliationTimeout: 15 * time.Minute,
-		AllowClusterScopedNamespaces: []string{
-			"rune-system",
-			"kube-system",
-		},
+		MetricsAddr:                  ":9090",
+		ProbeAddr:                    ":8081",
+		LeaderElection:               false,
+		LeaderElectionID:             "installer-leader-election",
+		CacheDir:                     filepath.Join(home, ".cache", "installer"),
+		Concurrency:                  5,
+		ReconciliationTimeout:        15 * time.Minute,
+		AllowClusterScopedNamespaces: []string{"kube-system"},
 	}
 }
 
