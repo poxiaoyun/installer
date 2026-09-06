@@ -28,21 +28,19 @@ const (
 	AnnotationInstanceName = GroupName + "/instance-name"
 	// AnnotationInstanceNamespace identifies the owning native Instance by namespace.
 	AnnotationInstanceNamespace = GroupName + "/instance-namespace"
-	// AnnotationSchedulingTarget marks a rendered workload as a platform scheduling target.
-	AnnotationSchedulingTarget = GroupName + "/scheduling-target"
+	// AnnotationFlavorPath is an RFC 6901 JSON Pointer to the resolved Flavor
+	// object in Instance values. Installer projects its Pod runtime fields onto
+	// the annotated workload.
+	AnnotationFlavorPath = GroupName + "/flavor-path"
 )
 
 const (
 	ExtensionKindCommonMetadata = "CommonMetadata"
 	ExtensionKindRawManifest    = "RawManifest"
-	ExtensionKindScheduling     = "Scheduling"
 
 	ExtensionParamManifest             = "manifest"
 	ExtensionParamPodTemplates         = "podTemplates"
 	ExtensionParamVolumeClaimTemplates = "volumeClaimTemplates"
-	ExtensionParamSchedulingMode       = "mode"
-	ExtensionParamSchedulingPriority   = "priority"
-	ExtensionParamGangMinCount         = "minCount"
 )
 
 const (

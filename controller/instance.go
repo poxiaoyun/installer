@@ -631,14 +631,14 @@ func validateInstanceSource(instance *appsv1.Instance) error {
 }
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
-// The pipeline order is: Dashboard generation → ordered extensions →
-// platform scheduling → Namespace → native Instance membership → Paused.
+// The pipeline order is: Dashboard generation → ordered extensions → Flavor
+// Pod runtime projection → Namespace → native Instance membership → Paused.
 func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
 	var modifiers []postrender.ObjectModifier
 
 	// Extensions execute strictly in their declared order. Platform invariants run
 	// afterwards so objects added by an extension receive the same enforcement.
-	modifiers = append(modifiers, &postrender.ExtensionRenderer{
+	extensions := &postrender.ExtensionRenderer{
 		Extensions: instance.Spec.Extensions,
 		Handlers: map[string]postrender.ExtensionHandler{
 			apps.ExtensionKindCommonMetadata: &postrender.CommonMetadataHandler{
@@ -647,11 +647,7 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 			},
 			apps.ExtensionKindRawManifest: &postrender.RawManifestHandler{},
 		},
-	})
-	modifiers = append(modifiers, &postrender.SchedulingRenderer{
-		Extensions: instance.Spec.Extensions,
-		Handler:    &postrender.SchedulingHandler{},
-	})
+	}
 
 	// Namespace enforcement — validate scope and force namespace
 	allowClusterScoped := r.isClusterScopedAllowed(ctx, instance.Namespace)
@@ -682,6 +678,8 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 	// object modifiers so they receive the same namespace and common metadata.
 	chain := install.PostRendererChain{
 		postrender.DashboardPostRenderer{Name: instance.Name, Namespace: instance.Namespace},
+		postrender.CompositeRenderer{Modifiers: []postrender.ObjectModifier{extensions}},
+		&postrender.FlavorRenderer{Values: values},
 		postrender.CompositeRenderer{Modifiers: modifiers},
 	}
 	return chain
@@ -891,11 +889,6 @@ func (r *InstanceReconciler) resolveValues(ctx context.Context, instance *appsv1
 		// stable across storage round trips.
 		"replicas": float64(replicas),
 	}
-	schedulingValues, err := postrender.SchedulingValues(instance.Spec.Extensions)
-	if err != nil {
-		return nil, fmt.Errorf("resolve Scheduling extension: %w", err)
-	}
-	runtimeGlobal["scheduling"] = schedulingValues
 	base = mergeMaps(base, map[string]any{
 		"global": runtimeGlobal,
 	})

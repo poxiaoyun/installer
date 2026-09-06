@@ -78,7 +78,7 @@ Helm、Kustomize 和 Template 模式在资源进入 Kubernetes 前汇合：
 1. 渲染选中的来源；
 2. 追加从 Chart 派生的 dashboard 资源；
 3. 按顺序执行声明的 extensions；
-4. 在所有普通 extension 之后应用可选的 Scheduling extension；
+4. 根据 workload 的 `apps.xiaoshiai.cn/flavor-path` 投影已解析 Flavor 的 Pod runtime 配置；
 5. 强制执行 namespace 和 scope 权限；
 6. 为 Kustomize 和 Template 的直接资源写入 Instance 归属 annotations；Helm 资源使用 Helm release ownership metadata；
 7. 应用暂停行为；
@@ -90,9 +90,20 @@ RawManifest 资源与来源渲染资源遵守相同的权限、归属、暂停�
 
 凡是会影响 Helm 渲染 manifest、但不出现在 values 中的输入，都必须纳入 post-render identity。此类输入变化时必须改变 identity version，避免 Helm 错误复用旧 release。
 
-Scheduling 是由单个 `Scheduling` extension 承载的 Instance 交付策略。字符串参数只允许 `mode=default|volcano|gang`、`priority=default|low|medium|high`；仅 Gang 模式要求提供正整数 `minCount`。Apps 原样传递该 extension，preset 也会保留它。Post-renderer 将 low、medium 和 high 分别映射为 `lower-priority`、`medium-priority` 和 `high-priority`；Volcano 与 Gang 模式设置 `schedulerName=volcano`，default 模式不指定 Kubernetes scheduler。
+Pod runtime 配置由 Flavor 拥有。Apps 将选中的 Flavor 展开到 Instance values 后，Chart 在对应
+workload 顶层声明 `apps.xiaoshiai.cn/flavor-path`，值为 RFC 6901 JSON Pointer，例如 `/flavor`
+或 `/prefill/flavor`。Post-renderer 从该对象读取 `schedulerName`、`runtimeClassName` 和
+`podLabels`，仅对 `type=Accelerator` 的 Flavor 生效，并写入 PodSpec 与 Pod template metadata。
+Chart 已声明的同名 runtime 字段或 label 与 Flavor 不一致时安装失败，避免静默覆盖。
+Helm 的 Flavor 路径基于 Chart 默认值与 Instance 运行时 values 的标准 coalesce 结果解析，
+Instance 值优先；可选角色仅在 Chart 默认值中声明也可正常解析。该合并不修改 Instance values。
+Native 来源没有 Chart 默认值，直接读取已解析的 Instance values；不存在的路径仍明确报错。
 
-Controller 还会把规范化配置注入 `global.scheduling.mode`、`global.scheduling.priority`，并在 Gang 模式下注入 `global.scheduling.minCount`。没有该 extension 的 Instance 会显式注入 `default/default`，避免 API 客户端因 Chart 默认值而意外启用 Gang。Chart 只在 Gang 模式下使用这些隐藏 values 渲染自己的公共 PodGroup，以及 workload 顶层的 `scheduling.k8s.io/group-name` 引用。Chart 使用 `apps.xiaoshiai.cn/scheduling-target` 标识 scheduler 和 priority 的目标；包含多个 workload 的 Chart 必须显式排除辅助组件。Renderer 会校验每个 group 引用都能解析到 Chart 渲染的公共 PodGroup，其正整数 `minCount` 与平台注入值一致，并保持 Pod 与 PodGroup 的 priority 相同；它不会创建 PodGroup，也不会生成 Volcano 私有 group annotation。
+Installer 不读取 `Scheduling` extension，也不注入 `global.scheduling`，不为旧 Instance 提供兼容
+分支。Gang 调度完全属于 Chart：Chart 自己创建 PodGroup，并在成员 Workload 顶层 metadata.annotations
+声明 `scheduling.k8s.io/group-name`；Scheduling webhook 以该顶层引用为事实来源，向 Pod template
+投影同名注解。Chart 不应只写 Pod template 引用，否则会被 webhook 清除。Queue 仍由 Scheduling webhook 根据 namespace 与 quota domain
+投影，Chart 和 Installer 都不写 `scheduling.volcano.sh/queue-name`。
 
 ## 运行时配置所有权
 

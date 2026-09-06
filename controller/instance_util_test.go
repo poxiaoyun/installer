@@ -440,10 +440,6 @@ func TestInstalledInstanceIgnoresUnreadyDependency(t *testing.T) {
 			Values: appsv1.Values{Object: map[string]any{
 				"global": map[string]any{
 					"replicas": float64(1),
-					"scheduling": map[string]any{
-						"mode":     "default",
-						"priority": "default",
-					},
 				},
 			}},
 			Conditions: []metav1.Condition{{
@@ -1151,37 +1147,10 @@ func TestResolveValuesInjectsInstanceRuntimeValues(t *testing.T) {
 			if got, _ := global["keep"].(string); got != tt.wantGlobalKeep {
 				t.Fatalf("global.keep = %q, want %q", got, tt.wantGlobalKeep)
 			}
+			if _, found := global["scheduling"]; found {
+				t.Fatalf("global.scheduling must not be injected: %#v", global["scheduling"])
+			}
 		})
-	}
-}
-
-func TestResolveValuesInjectsSchedulingForCharts(t *testing.T) {
-	instance := &appsv1.Instance{Spec: appsv1.InstanceSpec{
-		Extensions: []appsv1.Extension{{
-			Name: "platform-scheduling",
-			Kind: apps.ExtensionKindScheduling,
-			Params: map[string]string{
-				apps.ExtensionParamSchedulingMode:     "gang",
-				apps.ExtensionParamSchedulingPriority: "low",
-				apps.ExtensionParamGangMinCount:       "3",
-			},
-		}},
-	}}
-	values, err := (&InstanceReconciler{}).resolveValues(t.Context(), instance)
-	if err != nil {
-		t.Fatal(err)
-	}
-	global, ok := values["global"].(map[string]any)
-	if !ok {
-		t.Fatalf("global values = %#v", values["global"])
-	}
-	scheduling, ok := global["scheduling"].(map[string]any)
-	if !ok {
-		t.Fatalf("global.scheduling = %#v", global["scheduling"])
-	}
-	want := map[string]any{"mode": "gang", "priority": "low", "minCount": float64(3)}
-	if !reflect.DeepEqual(scheduling, want) {
-		t.Fatalf("global.scheduling = %#v, want %#v", scheduling, want)
 	}
 }
 
