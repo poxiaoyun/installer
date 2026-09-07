@@ -375,7 +375,7 @@ func TestSyncStatusReportsScaledToZeroDeployment(t *testing.T) {
 		t.Fatalf("phase = %q, want ScaledToZero", instance.Status.Phase)
 	}
 	ready := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionReady)
-	if ready == nil || ready.Status != metav1.ConditionTrue {
+	if ready == nil || ready.Status != metav1.ConditionTrue || ready.Reason != ReasonScaledToZero {
 		t.Fatalf("ready condition = %#v", ready)
 	}
 }
@@ -568,6 +568,67 @@ func TestSyncStatusReportsScaledToZeroChildWithCompletedJob(t *testing.T) {
 	}
 	if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionReady) {
 		t.Fatalf("ready condition = %#v", meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionReady))
+	}
+}
+
+func TestRuntimePhasePreservesNestedInstanceProgressAndFailure(t *testing.T) {
+	jobResources := []appsv1.ManagedResource{{APIVersion: "batch/v1", Kind: "Job"}}
+	tests := []struct {
+		name        string
+		child       appsv1.State
+		wantPhase   appsv1.Phase
+		wantReady   bool
+		wantMessage string
+	}{
+		{
+			name:      "installed child remains stable",
+			child:     appsv1.State{Kind: "Instance", Status: string(appsv1.PhaseInstalled)},
+			wantPhase: appsv1.PhaseHealthy,
+			wantReady: true,
+		},
+		{
+			name:      "child progress prevents job success",
+			child:     appsv1.State{Kind: "Instance", Status: string(appsv1.PhaseWaiting)},
+			wantPhase: appsv1.PhaseDegraded,
+		},
+		{
+			name:        "partial child failure remains unhealthy",
+			child:       appsv1.State{Kind: "Instance", Status: string(appsv1.PhasePartialFailed), Message: "one task failed"},
+			wantPhase:   appsv1.PhaseUnhealthy,
+			wantMessage: "one task failed",
+		},
+		{
+			name:        "child failure prevents job success and keeps its message",
+			child:       appsv1.State{Kind: "Instance", Status: string(appsv1.PhaseUnhealthy), Message: "worker failed"},
+			wantPhase:   appsv1.PhaseUnhealthy,
+			wantMessage: "worker failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			phase, ready, message := computeRuntimePhase(jobResources, []appsv1.State{
+				tt.child,
+				{Kind: "Job", Status: apps.StateStatusSucceeded},
+			})
+			if phase != tt.wantPhase || ready != tt.wantReady || message != tt.wantMessage {
+				t.Fatalf("runtime result = %q/%t/%q, want %q/%t/%q", phase, ready, message, tt.wantPhase, tt.wantReady, tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestGetInstanceStatePreservesMessage(t *testing.T) {
+	child := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Status:     appsv1.InstanceStatus{Phase: appsv1.PhaseUnhealthy, Message: "worker failed"},
+	}
+	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := getInstanceState(&unstructured.Unstructured{Object: object})
+	if state.Status != string(appsv1.PhaseUnhealthy) || state.Message != "worker failed" {
+		t.Fatalf("state = %#v", state)
 	}
 }
 

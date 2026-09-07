@@ -64,7 +64,11 @@ func (r *InstanceReconciler) syncStatus(ctx context.Context, instance *appsv1.In
 		var ready bool
 		instance.Status.Phase, ready, instance.Status.Message = computeRuntimePhase(instance.Status.Resources, instance.Status.States)
 		if ready {
-			r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionTrue, ReasonReady, "Instance is ready")
+			reason, message := ReasonReady, "Instance is ready"
+			if instance.Status.Phase == appsv1.PhaseScaledToZero {
+				reason, message = ReasonScaledToZero, "Instance workloads are scaled to zero"
+			}
+			r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionTrue, reason, message)
 		} else {
 			r.setCondition(instance, appsv1.ConditionReady, metav1.ConditionFalse, string(instance.Status.Phase), instance.Status.Message)
 		}
@@ -121,9 +125,9 @@ func computeRuntimePhase(resources []appsv1.ManagedResource, states []appsv1.Sta
 	switch detectInstanceWorkloadType(resources) {
 	case InstanceWorkloadTypeJobOnly:
 		for _, state := range states {
-			// A scaled-to-zero component is a persistent workload even when
-			// the direct inventory contains only jobs.
-			if state.Status == apps.StateStatusScaledToZero {
+			// A nested Instance or zero-replica component is a persistent
+			// workload even when the direct inventory contains only jobs.
+			if state.Kind == "Instance" || state.Status == apps.StateStatusScaledToZero {
 				return computeWorkloadPhase(states)
 			}
 		}
@@ -196,14 +200,18 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 		case apps.StateStatusFailed,
 			apps.StateStatusError,
 			apps.StateStatusCrashLoopBackOff,
-			apps.StateStatusUnhealthy:
+			apps.StateStatusUnhealthy,
+			string(appsv1.PhasePartialFailed):
 			hasUnhealthy = true
 		case apps.StateStatusDegraded,
 			apps.StateStatusUpdating,
 			apps.StateStatusScaling,
 			apps.StateStatusPending,
 			apps.StateStatusPaused,
-			apps.StateStatusUnknown:
+			apps.StateStatusUnknown,
+			string(appsv1.PhaseReconciling),
+			string(appsv1.PhaseWaiting),
+			string(appsv1.PhaseTerminating):
 			hasDegraded = true
 		case apps.StateStatusRunning,
 			apps.StateStatusHealthy,
@@ -212,7 +220,8 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 		case apps.StateStatusScaledToZero:
 			hasScaledToZero = true
 		case apps.StateStatusSucceeded,
-			apps.StateStatusCompleted:
+			apps.StateStatusCompleted,
+			string(appsv1.PhaseInstalled):
 			// Completed tasks do not keep otherwise scaled-to-zero workloads active.
 		default:
 			// Preserve custom status strings for display, but never infer Healthy
@@ -232,26 +241,13 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 	return appsv1.PhaseHealthy, true, ""
 }
 
-func getmap(m map[string]any, keys ...string) any {
-	if len(keys) == 0 {
-		return m
-	}
-	if v, ok := m[keys[0]]; ok {
-		if len(keys) == 1 {
-			return v
-		}
-		if vm, ok := v.(map[string]any); ok {
-			return getmap(vm, keys[1:]...)
-		}
-	}
-	return nil
-}
-
+// JobKinds lists workload kinds whose lifecycle is task-oriented.
 var JobKinds = []schema.GroupKind{
 	{Group: "batch", Kind: "Job"},
 	{Group: "batch", Kind: "CronJob"},
 }
 
+// WorkloadKinds lists workload kinds expected to remain active after startup.
 var WorkloadKinds = []schema.GroupKind{
 	{Group: "apps", Kind: "Deployment"},
 	{Group: "apps", Kind: "StatefulSet"},
@@ -260,14 +256,15 @@ var WorkloadKinds = []schema.GroupKind{
 	{Group: "core", Kind: "Pod"},
 }
 
+// InstanceWorkloadType classifies the runtime lifecycle represented by managed resources.
 type InstanceWorkloadType string
 
 const (
-	// JobOnly means the instance only has job workload
+	// InstanceWorkloadTypeJobOnly means the instance contains only task-oriented workloads.
 	InstanceWorkloadTypeJobOnly InstanceWorkloadType = "JobOnly"
-	// Workload means the instance has a long-running workload, possibly with jobs.
+	// InstanceWorkloadTypeWorkload means the instance contains a persistent workload.
 	InstanceWorkloadTypeWorkload InstanceWorkloadType = "Workload"
-	// Config means the instance only has config (without workload and job)
+	// InstanceWorkloadTypeConfig means the instance has no recognized workload resources.
 	InstanceWorkloadTypeConfig InstanceWorkloadType = "Config"
 )
 
@@ -308,7 +305,8 @@ func getFailureMessage(states []appsv1.State) string {
 
 func isStateFailure(status string) bool {
 	switch status {
-	case apps.StateStatusFailed, apps.StateStatusError, apps.StateStatusCrashLoopBackOff, apps.StateStatusUnhealthy:
+	case apps.StateStatusFailed, apps.StateStatusError, apps.StateStatusCrashLoopBackOff, apps.StateStatusUnhealthy,
+		string(appsv1.PhasePartialFailed):
 		return true
 	}
 	return false
@@ -372,6 +370,7 @@ func getInstanceState(resource *unstructured.Unstructured) appsv1.State {
 	}
 	state := appsv1.State{Name: instance.Name, Kind: "Instance"}
 	state.Status = string(instance.Status.Phase)
+	state.Message = instance.Status.Message
 	return state
 }
 

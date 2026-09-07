@@ -9,6 +9,7 @@ const (
 	ReasonAutoscalingReady           = "AutoscalingReady"
 	ReasonPaused                     = "Paused"
 	ReasonReady                      = "Ready"
+	ReasonScaledToZero               = "ScaledToZero"
 	ReasonExpressionEvaluationFailed = "ExpressionEvaluationFailed"
 	ReasonExpressionsReady           = "ExpressionsReady"
 	ReasonEndpointResolutionFailed   = "EndpointResolutionFailed"
