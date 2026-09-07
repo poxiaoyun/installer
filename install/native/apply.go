@@ -16,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
@@ -262,17 +264,19 @@ func (a *ClientApply) createNsIfNotExists(ctx context.Context, name string) erro
 	return err
 }
 
+// ApplyOptions controls how ApplyResource updates an existing resource.
 type ApplyOptions struct {
 	ServerSideApply bool
 	FieldOwner      string
 }
 
+// ApplyResource creates a missing resource or updates an existing resource.
 func ApplyResource(ctx context.Context, cli client.Client, obj client.Object, options ApplyOptions) error {
 	if options.FieldOwner == "" {
 		options.FieldOwner = "bundler"
 	}
 
-	exists, _ := obj.DeepCopyObject().(client.Object)
+	exists := obj.DeepCopyObject().(client.Object)
 	if err := cli.Get(ctx, client.ObjectKeyFromObject(exists), exists); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return err
@@ -280,24 +284,22 @@ func ApplyResource(ctx context.Context, cli client.Client, obj client.Object, op
 		return cli.Create(ctx, obj)
 	}
 
-	var patch client.Patch
-	var patchoptions []client.PatchOption
 	if options.ServerSideApply {
 		obj.SetManagedFields(nil)
-		patch = client.Apply
-		patchoptions = append(patchoptions,
+		data, err := json.Marshal(obj)
+		if err != nil {
+			return err
+		}
+		return cli.Patch(
+			ctx,
+			obj,
+			client.RawPatch(types.ApplyPatchType, data),
 			client.FieldOwner(options.FieldOwner),
 			client.ForceOwnership,
 		)
-	} else {
-		patch = client.StrategicMergeFrom(exists)
 	}
 
-	// patch
-	if err := cli.Patch(ctx, obj, patch, patchoptions...); err != nil {
-		return err
-	}
-	return nil
+	return cli.Patch(ctx, obj, client.StrategicMergeFrom(exists))
 }
 
 func IsSkipUpdate(obj client.Object) bool {

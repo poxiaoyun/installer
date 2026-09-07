@@ -533,21 +533,6 @@ var _ = Describe("ObservedGeneration and Conditions tests", func() {
 	})
 })
 
-var _ = Describe("Phase status tests", func() {
-	It("should verify all phase constants are valid", func() {
-		// Verify all phase constants exist and have expected values
-		Expect(string(appsv1.PhaseInstalled)).To(Equal("Installed"))
-		Expect(string(appsv1.PhaseWaiting)).To(Equal("Waiting"))
-		Expect(string(appsv1.PhaseFailed)).To(Equal("Failed"))
-	})
-
-	It("should verify all condition type constants are valid", func() {
-		// Verify all condition type constants exist
-		Expect(appsv1.ConditionReady).To(Equal("Ready"))
-		Expect(appsv1.ConditionDependenciesReady).To(Equal("DependenciesReady"))
-	})
-})
-
 type pauseDuringResumeInstaller struct {
 	client        client.Client
 	appliedPaused bool

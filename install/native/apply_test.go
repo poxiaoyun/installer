@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"xiaoshiai.cn/installer/apis/apps"
@@ -17,10 +18,11 @@ var configMapGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Conf
 
 type trackingClient struct {
 	client.Client
-	creates int
-	patches int
-	deletes int
-	order   []string
+	creates    int
+	patches    int
+	deletes    int
+	order      []string
+	patchTypes []types.PatchType
 }
 
 func (c *trackingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -32,6 +34,7 @@ func (c *trackingClient) Create(ctx context.Context, obj client.Object, opts ...
 func (c *trackingClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 	c.patches++
 	c.order = append(c.order, "patch")
+	c.patchTypes = append(c.patchTypes, patch.Type())
 	return c.Client.Patch(ctx, obj, patch, opts...)
 }
 
@@ -63,7 +66,10 @@ func testSyncOptions() *SyncOptions {
 func TestSyncDiffRetainsExistingResourceOnUpgrade(t *testing.T) {
 	ctx := context.Background()
 	live := testResource("settings", "old", nil)
-	base := fake.NewClientBuilder().WithRuntimeObjects(live).Build()
+	base := fake.
+		NewClientBuilder().
+		WithRuntimeObjects(live).
+		Build()
 	tracking := &trackingClient{Client: base}
 	desired := testResource("settings", "new", map[string]string{
 		apps.AnnotationUpgradeStrategy: install.UpgradeStrategyRetain,
@@ -86,6 +92,39 @@ func TestSyncDiffRetainsExistingResourceOnUpgrade(t *testing.T) {
 	value, _, _ := unstructured.NestedString(got.Object, "data", "value")
 	if value != "old" {
 		t.Fatalf("live value = %q, want old", value)
+	}
+}
+
+func TestSyncDiffAppliesExistingResourceServerSide(t *testing.T) {
+	ctx := context.Background()
+	live := testResource("settings", "old", nil)
+	base := fake.
+		NewClientBuilder().
+		WithRuntimeObjects(live).
+		Build()
+	tracking := &trackingClient{Client: base}
+	desired := testResource("settings", "new", nil)
+
+	managed, err := (&ClientApply{Client: tracking}).SyncDiff(ctx, DiffResult{Applys: []*unstructured.Unstructured{desired}}, testSyncOptions())
+	if err != nil {
+		t.Fatalf("SyncDiff() error = %v", err)
+	}
+	if tracking.creates != 0 || tracking.patches != 1 || tracking.deletes != 0 {
+		t.Fatalf("Apply operations: creates=%d patches=%d deletes=%d", tracking.creates, tracking.patches, tracking.deletes)
+	}
+	if len(tracking.patchTypes) != 1 || tracking.patchTypes[0] != types.ApplyPatchType {
+		t.Fatalf("Patch types = %v, want [%s]", tracking.patchTypes, types.ApplyPatchType)
+	}
+	if len(managed) != 1 {
+		t.Fatalf("managed resources = %d, want 1", len(managed))
+	}
+	got := testResource("settings", "", nil)
+	if err := base.Get(ctx, client.ObjectKeyFromObject(desired), got); err != nil {
+		t.Fatal(err)
+	}
+	value, _, _ := unstructured.NestedString(got.Object, "data", "value")
+	if value != "new" {
+		t.Fatalf("live value = %q, want new", value)
 	}
 }
 
