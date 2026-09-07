@@ -41,7 +41,7 @@ Controller 是编排所有者。安装 adapter 不推断 Instance 策略，contr
 6. 读取受管资源并投影运行状态、表达式、scale 观察和 phase。
 7. 为所有受管资源种类注册动态 watch。
 
-Apply 失败不会替换最近一次成功执行的结果。失败通过 phase、message 和 conditions 暴露。Reconcile 受运行时选项限制；取消会返回 controller runtime，而不会转换成成功状态。
+Apply 失败不会替换最近一次成功执行的结果。失败通过 phase、message 和 conditions 暴露。Reconcile 受运行时选项限制；取消会返回 controller runtime，而不会转换成成功状态。执行期间出现更新的 values 或暂停声明时，旧执行只能提交其读取到的快照，后续 reconcile 按新声明收敛。
 
 删除是独立流程。只有选中的 installer 按生命周期策略成功删除或保留受管资源后，finalizer 才会移除。
 
@@ -134,7 +134,7 @@ Lifecycle annotations 在所有模式中含义相同：
 - DaemonSet 获得一个无法满足的 required node affinity；
 - 其它资源种类保持不变。
 
-期望副本数为零本身不表示暂停，而是正常、健康的 scaled-to-zero 状态。
+期望副本数为零本身不表示暂停。观察到的常驻工作负载全部归零时，Instance 以独立的 `ScaledToZero` 阶段表达正常、稳定的零副本状态。
 
 受管 HorizontalPodAutoscaler 是由同一个 Instance 渲染和管理生命周期，并以该 Instance 的 Deployment 或 StatefulSet 为目标的 HPA。暂停不会修改或删除 HPA。当 `minReplicas` 大于零时，把目标期望副本数设为零会触发 Kubernetes HPA maintenance-mode deactivation。恢复会重新渲染非零目标，未变化的 HPA 随之重新生效。Installer 不保存 HPA 状态或副本快照。
 
@@ -149,6 +149,10 @@ Lifecycle annotations 在所有模式中含义相同：
 每次 reconcile 都会在产生任何安装副作用之前直接从 API server 读取 Instance，避免 informer cache 延迟导致重复执行 Helm 或 native apply。Status 写入会在同一新鲜读取边界之后重试乐观锁冲突；仅当 generation 未变化时，重试才会携带期望 status。若出现更新的 generation，则重新入队，避免把过期 status 投影到新的期望配置。
 
 运行阶段从观察到的 workload states 推导，但显式暂停始终投影为 `Paused`。表达式失败有独立 condition，不覆盖独立计算的运行阶段。默认观察支持常见 workload states，以及 Kubernetes Service、Ingress、LoadBalancer 和 NodePort endpoints；CEL annotations 可以替换 states 或 endpoints，并追加 summary 或 additional endpoints。
+
+常驻工作负载的聚合优先级为 `Unhealthy`、`Degraded`、`ScaledToZero`、`Healthy`。至少一个组件为 `ScaledToZero`，且其余组件也为 `ScaledToZero` 或已经 `Succeeded` / `Completed` 时，顶层阶段为 `ScaledToZero`；已完成的辅助任务不阻止归零聚合。存在 `Running` / `Healthy` / `Active` 组件时，部分组件归零仍聚合为 `Healthy`；失败、进行中和未知状态继续按更高优先级聚合。默认资源观察、嵌套 Instance 和 CEL 提供的 states 使用同一规则。
+
+`ScaledToZero` 保持 `Ready=True`，表示工作负载已达到正常稳定状态，不承诺正在提供服务，也不表示暂停或描述缩容原因。没有组件状态时为 `Installed`，原生纯任务应用沿用任务阶段；不从 Instance 期望副本数或 Pod 总数推导归零阶段。组件 states 中出现 `ScaledToZero` 即声明了持续存在的零副本工作负载，即使资源清单仅包含 Job 和自定义资源，也必须使用常驻工作负载规则聚合；CEL 声明遵守同一语义。
 
 Installer 的默认 endpoint 发现只解释其拥有通用语义的 Kubernetes 资源，不识别特定插件或第三方 CR 的 status 结构。创建自定义资源的 Chart 拥有该资源到 Instance endpoint 的映射，并通过 endpoint expression 显式投影；Installer 只提供统一的表达式求值和 endpoint status seam。
 

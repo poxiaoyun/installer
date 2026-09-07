@@ -151,6 +151,14 @@ NAME       STATUS      NAMESPACE   VERSION   UPGRADETIMESTAMP   AGE
 my-nginx   Installed   default     10.2.1    2s                 2s
 ```
 
+`status.phase` reports `ScaledToZero` when at least one observed workload
+component is scaled to zero and every other component is also scaled to zero
+or has completed. A running component keeps a partially scaled-down Instance
+`Healthy`; failure and progress states take precedence. Explicit pause reports
+`Paused` independently. `ScaledToZero` retains `Ready=True` as a stable state,
+but does not imply that the application is serving requests. Component details
+remain available in `status.states`.
+
 ## Contributing
 
 Contributions are welcome! Please open issues and submit pull requests for any features, bug fixes, or improvements.

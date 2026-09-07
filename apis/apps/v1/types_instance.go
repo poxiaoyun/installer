@@ -208,6 +208,7 @@ type InstanceStatus struct {
 	Selector string `json:"selector,omitempty"`
 
 	// Phase is the current lifecycle or runtime state of the Instance.
+	// ScaledToZero denotes stable zero-replica workloads independently of Paused.
 	Phase Phase `json:"phase,omitempty"`
 
 	// Message describes an installation or runtime failure. Expected progress
@@ -296,6 +297,7 @@ func (obj *ManagedResource) GroupVersionKind() schema.GroupVersionKind {
 
 func (obj *ManagedResource) GetObjectKind() schema.ObjectKind { return obj }
 
+// Phase describes the current installation or runtime state of an Instance.
 type Phase string
 
 // +kubebuilder:validation:Enum=helm;kustomize;template
@@ -319,9 +321,11 @@ const (
 	PhasePaused Phase = "Paused" // Paused
 
 	// Long-running Workload Phases (Deployment, StatefulSet, DaemonSet)
-	PhaseHealthy   Phase = "Healthy"   // Healthy (All components healthy)
-	PhaseDegraded  Phase = "Degraded"  // Degraded (Partial replicas available)
-	PhaseUnhealthy Phase = "Unhealthy" // Unhealthy
+	PhaseHealthy Phase = "Healthy" // Healthy (All components healthy)
+	// PhaseScaledToZero means all persistent workloads are stably scaled to zero.
+	PhaseScaledToZero Phase = "ScaledToZero"
+	PhaseDegraded     Phase = "Degraded"  // Degraded (Partial replicas available)
+	PhaseUnhealthy    Phase = "Unhealthy" // Unhealthy
 
 	// Job Phases (Job, Pod)
 	PhasePending       Phase = "Pending"       // Pending (Waiting for scheduling)
@@ -373,7 +377,9 @@ const (
 	ConditionDependenciesReady = "DependenciesReady"
 	// ConditionInstalled indicates whether the instance has been successfully installed.
 	ConditionInstalled = "Installed"
-	// ConditionReady indicates whether the instance is ready and fully operational.
+	// ConditionReady indicates whether the instance has reached a stable runtime
+	// state. Installed configuration, completed jobs, and scaled-to-zero workloads
+	// may be ready without serving requests.
 	ConditionReady = "Ready"
 	// ConditionExpressionsReady indicates whether configured status expressions evaluated successfully.
 	ConditionExpressionsReady = "ExpressionsReady"

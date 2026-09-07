@@ -567,9 +567,7 @@ func (i *pauseDuringResumeInstaller) Apply(ctx context.Context, instance install
 		// The fake client does not advance generation, so simulate the API
 		// server behavior for the immediate pause spec update.
 		latest.Generation++
-		latest.Spec.Values = appsv1.Values{Object: map[string]any{
-			"global": map[string]any{"paused": true},
-		}}
+		latest.Spec.Values.Object["global"].(map[string]any)["paused"] = true
 		if err := i.client.Update(ctx, latest); err != nil {
 			return nil, err
 		}
@@ -656,6 +654,12 @@ func TestImmediatePauseConvergesAfterResumeStatusConflict(t *testing.T) {
 	}
 	if current.Status.ObservedGeneration != current.Generation {
 		t.Fatalf("observed generation = %d, want %d", current.Status.ObservedGeneration, current.Generation)
+	}
+	if current.Spec.Values.Object["global"].(map[string]any)["paused"] != true {
+		t.Fatal("resume retry replaced the newer pause declaration")
+	}
+	if current.Status.Phase != appsv1.PhasePaused {
+		t.Fatalf("pause did not apply the current declaration: %#v", current.Status)
 	}
 	global := current.Status.Values.Object["global"].(map[string]any)
 	if paused, _ := global["paused"].(bool); !paused {

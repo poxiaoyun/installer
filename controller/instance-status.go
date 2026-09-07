@@ -120,6 +120,13 @@ func computeRuntimePhase(resources []appsv1.ManagedResource, states []appsv1.Sta
 	}
 	switch detectInstanceWorkloadType(resources) {
 	case InstanceWorkloadTypeJobOnly:
+		for _, state := range states {
+			// A scaled-to-zero component is a persistent workload even when
+			// the direct inventory contains only jobs.
+			if state.Status == apps.StateStatusScaledToZero {
+				return computeWorkloadPhase(states)
+			}
+		}
 		return computeJobPhase(states)
 	case InstanceWorkloadTypeWorkload, InstanceWorkloadTypeConfig:
 		// Config includes CustomResources whose runtime states are supplied by
@@ -182,6 +189,8 @@ func computeJobPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 	hasUnhealthy := false
 	hasDegraded := false
+	hasActive := false
+	hasScaledToZero := false
 	for _, s := range states {
 		switch s.Status {
 		case apps.StateStatusFailed,
@@ -198,11 +207,13 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 			hasDegraded = true
 		case apps.StateStatusRunning,
 			apps.StateStatusHealthy,
-			apps.StateStatusActive,
-			apps.StateStatusScaledToZero,
-			apps.StateStatusSucceeded,
+			apps.StateStatusActive:
+			hasActive = true
+		case apps.StateStatusScaledToZero:
+			hasScaledToZero = true
+		case apps.StateStatusSucceeded,
 			apps.StateStatusCompleted:
-			// Explicitly healthy.
+			// Completed tasks do not keep otherwise scaled-to-zero workloads active.
 		default:
 			// Preserve custom status strings for display, but never infer Healthy
 			// from a status the installer does not understand.
@@ -214,6 +225,9 @@ func computeWorkloadPhase(states []appsv1.State) (appsv1.Phase, bool, string) {
 	}
 	if hasDegraded {
 		return appsv1.PhaseDegraded, false, ""
+	}
+	if hasScaledToZero && !hasActive {
+		return appsv1.PhaseScaledToZero, true, ""
 	}
 	return appsv1.PhaseHealthy, true, ""
 }

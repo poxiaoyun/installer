@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
 	k8sappsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -332,7 +334,7 @@ func TestSyncStatusRejectsInvalidAdditionalScaleSelector(t *testing.T) {
 	}
 }
 
-func TestSyncStatusReportsScaledToZeroDeploymentAsHealthy(t *testing.T) {
+func TestSyncStatusReportsScaledToZeroDeployment(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := k8sappsv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -343,7 +345,11 @@ func TestSyncStatusReportsScaledToZeroDeploymentAsHealthy(t *testing.T) {
 		Spec:       k8sappsv1.DeploymentSpec{Replicas: &zero},
 		Status:     k8sappsv1.DeploymentStatus{Replicas: 0, ReadyReplicas: 0},
 	}
-	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deployment).Build()
+	cli := fake.
+		NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(deployment).
+		Build()
 	instance := &appsv1.Instance{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
 		Status: appsv1.InstanceStatus{
@@ -365,12 +371,203 @@ func TestSyncStatusReportsScaledToZeroDeploymentAsHealthy(t *testing.T) {
 	if len(instance.Status.States) != 1 || instance.Status.States[0].Status != "ScaledToZero" {
 		t.Fatalf("states = %#v, want ScaledToZero", instance.Status.States)
 	}
-	if instance.Status.Phase != appsv1.PhaseHealthy {
-		t.Fatalf("phase = %q, want %q", instance.Status.Phase, appsv1.PhaseHealthy)
+	if instance.Status.Phase != appsv1.PhaseScaledToZero {
+		t.Fatalf("phase = %q, want ScaledToZero", instance.Status.Phase)
 	}
 	ready := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionReady)
 	if ready == nil || ready.Status != metav1.ConditionTrue {
 		t.Fatalf("ready condition = %#v", ready)
+	}
+}
+
+func TestSyncStatusAggregatesScaledToZero(t *testing.T) {
+	tests := []struct {
+		name         string
+		statuses     []string
+		paused       bool
+		jobResources bool
+		wantPhase    appsv1.Phase
+		wantReady    metav1.ConditionStatus
+	}{
+		{
+			name:      "all components scaled to zero",
+			statuses:  []string{apps.StateStatusScaledToZero, apps.StateStatusScaledToZero},
+			wantPhase: appsv1.PhaseScaledToZero,
+			wantReady: metav1.ConditionTrue,
+		},
+		{
+			name:      "completed tasks do not prevent scaled to zero",
+			statuses:  []string{apps.StateStatusScaledToZero, apps.StateStatusSucceeded, apps.StateStatusCompleted},
+			wantPhase: appsv1.PhaseScaledToZero,
+			wantReady: metav1.ConditionTrue,
+		},
+		{
+			name:      "running component keeps partial scale healthy",
+			statuses:  []string{apps.StateStatusScaledToZero, apps.StateStatusRunning},
+			wantPhase: appsv1.PhaseHealthy,
+			wantReady: metav1.ConditionTrue,
+		},
+		{
+			name:      "healthy component keeps partial scale healthy",
+			statuses:  []string{apps.StateStatusHealthy, apps.StateStatusScaledToZero},
+			wantPhase: appsv1.PhaseHealthy,
+			wantReady: metav1.ConditionTrue,
+		},
+		{
+			name:      "active component keeps partial scale healthy",
+			statuses:  []string{apps.StateStatusScaledToZero, apps.StateStatusActive},
+			wantPhase: appsv1.PhaseHealthy,
+			wantReady: metav1.ConditionTrue,
+		},
+		{
+			name:      "scale in progress takes precedence",
+			statuses:  []string{apps.StateStatusScaledToZero, apps.StateStatusScaling},
+			wantPhase: appsv1.PhaseDegraded,
+			wantReady: metav1.ConditionFalse,
+		},
+		{
+			name:      "unknown component takes precedence",
+			statuses:  []string{apps.StateStatusScaledToZero, "Starting"},
+			wantPhase: appsv1.PhaseDegraded,
+			wantReady: metav1.ConditionFalse,
+		},
+		{
+			name:      "failure takes precedence over scale in progress",
+			statuses:  []string{apps.StateStatusScaledToZero, apps.StateStatusScaling, apps.StateStatusFailed},
+			wantPhase: appsv1.PhaseUnhealthy,
+			wantReady: metav1.ConditionFalse,
+		},
+		{
+			name:      "explicit pause takes precedence",
+			statuses:  []string{apps.StateStatusScaledToZero, apps.StateStatusScaledToZero},
+			paused:    true,
+			wantPhase: appsv1.PhasePaused,
+			wantReady: metav1.ConditionFalse,
+		},
+		{
+			name:         "completed jobs stay succeeded",
+			statuses:     []string{apps.StateStatusSucceeded, apps.StateStatusCompleted},
+			jobResources: true,
+			wantPhase:    appsv1.PhaseSucceeded,
+			wantReady:    metav1.ConditionTrue,
+		},
+		{
+			name:      "completed components alone do not imply scaled to zero",
+			statuses:  []string{apps.StateStatusSucceeded, apps.StateStatusCompleted},
+			wantPhase: appsv1.PhaseHealthy,
+			wantReady: metav1.ConditionTrue,
+		},
+		{
+			name:         "custom zero component with completed job",
+			statuses:     []string{apps.StateStatusScaledToZero, apps.StateStatusSucceeded},
+			jobResources: true,
+			wantPhase:    appsv1.PhaseScaledToZero,
+			wantReady:    metav1.ConditionTrue,
+		},
+		{
+			name:         "custom zero component with running job",
+			statuses:     []string{apps.StateStatusScaledToZero, apps.StateStatusRunning},
+			jobResources: true,
+			wantPhase:    appsv1.PhaseHealthy,
+			wantReady:    metav1.ConditionTrue,
+		},
+		{
+			name:         "custom zero component with failed job",
+			statuses:     []string{apps.StateStatusScaledToZero, apps.StateStatusFailed},
+			jobResources: true,
+			wantPhase:    appsv1.PhaseUnhealthy,
+			wantReady:    metav1.ConditionFalse,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			states := make([]appsv1.State, len(tt.statuses))
+			for i, status := range tt.statuses {
+				states[i] = appsv1.State{Name: "component", Status: status}
+			}
+			expression, err := json.Marshal(states)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instance := &appsv1.Instance{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "demo",
+					Namespace:   "default",
+					Annotations: map[string]string{apps.AnnotationStatesExpression: string(expression)},
+				},
+				Status: appsv1.InstanceStatus{Values: appsv1.Values{Object: map[string]any{
+					"global": map[string]any{"replicas": int32(3), "paused": tt.paused},
+				}}},
+			}
+			if tt.jobResources {
+				instance.Status.Resources = []appsv1.ManagedResource{{
+					APIVersion: "batch/v1",
+					Kind:       "Job",
+					Namespace:  "default",
+					Name:       "setup",
+				}}
+			}
+			if err := newEmptyStatusReconciler(t).syncStatus(t.Context(), instance); err != nil {
+				t.Fatal(err)
+			}
+			if instance.Status.Phase != tt.wantPhase {
+				t.Fatalf("phase = %q, want %q", instance.Status.Phase, tt.wantPhase)
+			}
+			ready := meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionReady)
+			if ready == nil || ready.Status != tt.wantReady {
+				t.Fatalf("ready condition = %#v, want %s", ready, tt.wantReady)
+			}
+		})
+	}
+}
+
+func TestSyncStatusReportsScaledToZeroChildWithCompletedJob(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, addToScheme := range []func(*runtime.Scheme) error{corev1.AddToScheme, batchv1.AddToScheme, appsv1.AddToScheme} {
+		if err := addToScheme(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	child := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+		Status:     appsv1.InstanceStatus{Phase: appsv1.PhaseScaledToZero},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: "setup", Namespace: "default"},
+		Status: batchv1.JobStatus{Conditions: []batchv1.JobCondition{{
+			Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		}}},
+	}
+	instance := &appsv1.Instance{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
+		Status: appsv1.InstanceStatus{Resources: []appsv1.ManagedResource{
+			{
+				APIVersion: appsv1.GroupVersion.String(),
+				Kind:       "Instance",
+				Namespace:  "default",
+				Name:       child.Name,
+			},
+			{
+				APIVersion: "batch/v1",
+				Kind:       "Job",
+				Namespace:  "default",
+				Name:       job.Name,
+			},
+		}},
+	}
+	cli := fake.
+		NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(child, job).
+		Build()
+	if err := (&InstanceReconciler{Client: cli}).syncStatus(t.Context(), instance); err != nil {
+		t.Fatal(err)
+	}
+	if instance.Status.Phase != appsv1.PhaseScaledToZero {
+		t.Fatalf("phase = %q, want ScaledToZero", instance.Status.Phase)
+	}
+	if !meta.IsStatusConditionTrue(instance.Status.Conditions, appsv1.ConditionReady) {
+		t.Fatalf("ready condition = %#v", meta.FindStatusCondition(instance.Status.Conditions, appsv1.ConditionReady))
 	}
 }
 
