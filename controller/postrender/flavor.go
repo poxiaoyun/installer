@@ -49,10 +49,12 @@ func (r *FlavorRenderer) ModifyObjects(objects []*unstructured.Unstructured) ([]
 		if err != nil {
 			return nil, fmt.Errorf("workload %s/%s: %w", object.GetKind(), object.GetName(), err)
 		}
-		if flavor.Type != acceleratorFlavorType {
-			continue
+		if flavor.Type == acceleratorFlavorType {
+			if err := applyFlavorRuntime(object, podSpecPath, podMetadataPath, flavor); err != nil {
+				return nil, err
+			}
 		}
-		if err := applyFlavorRuntime(object, podSpecPath, podMetadataPath, flavor); err != nil {
+		if err := applyFlavorNUMA(object, podSpecPath, flavor); err != nil {
 			return nil, err
 		}
 	}
@@ -64,6 +66,7 @@ type resolvedFlavorRuntime struct {
 	PodLabels        map[string]string
 	RuntimeClassName string
 	SchedulerName    string
+	NUMAPolicy       string
 }
 
 func resolveFlavorValue(values map[string]any, pointer string) (resolvedFlavorRuntime, error) {
@@ -97,6 +100,17 @@ func resolveFlavorValue(values map[string]any, pointer string) (resolvedFlavorRu
 				return resolvedFlavorRuntime{}, fmt.Errorf("Flavor path %q pod label %q has type %T, want string", pointer, key, rawValue)
 			}
 			flavor.PodLabels[key] = value
+		}
+	}
+	// Only this platform policy is interpreted. Other resource annotations keep
+	// their previous behavior and are not newly projected onto existing Pods.
+	if raw, found := object["podAnnotations"]; found && raw != nil {
+		annotations, ok := raw.(map[string]any)
+		if !ok {
+			return resolvedFlavorRuntime{}, fmt.Errorf("Flavor path %q field podAnnotations has type %T, want object", pointer, raw)
+		}
+		if flavor.NUMAPolicy, err = optionalString(annotations, numaPolicyAnnotation); err != nil {
+			return resolvedFlavorRuntime{}, fmt.Errorf("Flavor path %q: %w", pointer, err)
 		}
 	}
 	return flavor, nil

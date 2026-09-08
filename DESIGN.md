@@ -95,6 +95,13 @@ workload 顶层声明 `apps.xiaoshiai.cn/flavor-path`，值为 RFC 6901 JSON Poi
 或 `/prefill/flavor`。Post-renderer 从该对象读取 `schedulerName`、`runtimeClassName` 和
 `podLabels`，仅对 `type=Accelerator` 的 Flavor 生效，并写入 PodSpec 与 Pod template metadata。
 Chart 已声明的同名 runtime 字段或 label 与 Flavor 不一致时安装失败，避免静默覆盖。
+新增的 CPU NUMA 是显式例外：Flavor 的 `podAnnotations` 中
+`scheduling.xiaoshiai.cn/numa-policy=single-numa-node` 时，CPU 和 Accelerator Flavor 均可使用。
+Installer 校验 `volcano` scheduler，以及模板中所有普通/init 容器的整数 CPU、正值且相等的
+CPU/内存 requests/limits，将公共策略写入 workload 顶层 metadata，交由 Scheduling extension
+投影后端注解。仅支持 Deployment、StatefulSet、DaemonSet、Job；拒绝 Pod-level resources
+和不受 Scheduling admission 管理的其它 workload kind。未启用策略保持原有行为，其余
+Pod annotations 不因这次扩展开始投影。
 Helm 的 Flavor 路径基于 Chart 默认值与 Instance 运行时 values 的标准 coalesce 结果解析，
 Instance 值优先；可选角色仅在 Chart 默认值中声明也可正常解析。该合并不修改 Instance values。
 Native 来源没有 Chart 默认值，直接读取已解析的 Instance values；不存在的路径仍明确报错。
