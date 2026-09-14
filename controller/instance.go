@@ -631,8 +631,9 @@ func validateInstanceSource(instance *appsv1.Instance) error {
 }
 
 // buildPostRenderer constructs the composite PostRenderer pipeline from instance spec.
-// The pipeline order is: Dashboard generation → ordered extensions → Flavor
-// Pod runtime projection → Namespace → native Instance membership → Paused.
+// The pipeline order is: Dashboard generation → ordered extensions → Namespace
+// → native Instance membership → Paused. Pod runtime configuration belongs to
+// the rendered source.
 func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *appsv1.Instance, values map[string]any) install.PostRenderer {
 	var modifiers []postrender.ObjectModifier
 
@@ -679,7 +680,6 @@ func (r *InstanceReconciler) buildPostRenderer(ctx context.Context, instance *ap
 	chain := install.PostRendererChain{
 		postrender.DashboardPostRenderer{Name: instance.Name, Namespace: instance.Namespace},
 		postrender.CompositeRenderer{Modifiers: []postrender.ObjectModifier{extensions}},
-		&postrender.FlavorRenderer{Values: values},
 		postrender.CompositeRenderer{Modifiers: modifiers},
 	}
 	return chain

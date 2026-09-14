@@ -78,11 +78,10 @@ Helm、Kustomize 和 Template 模式在资源进入 Kubernetes 前汇合：
 1. 渲染选中的来源；
 2. 追加从 Chart 派生的 dashboard 资源；
 3. 按顺序执行声明的 extensions；
-4. 根据 workload 的 `apps.xiaoshiai.cn/flavor-path` 投影已解析 Flavor 的 Pod runtime 配置；
-5. 强制执行 namespace 和 scope 权限；
-6. 为 Kustomize 和 Template 的直接资源写入 Instance 归属 annotations；Helm 资源使用 Helm release ownership metadata；
-7. 应用暂停行为；
-8. 在安装 adapter 中校验并转换生命周期策略。
+4. 强制执行 namespace 和 scope 权限；
+5. 为 Kustomize 和 Template 的直接资源写入 Instance 归属 annotations；Helm 资源使用 Helm release ownership metadata；
+6. 应用暂停行为；
+7. 在安装 adapter 中校验并转换生命周期策略。
 
 RawManifest 资源与来源渲染资源遵守相同的权限、归属、暂停和生命周期规则。Kustomize 和 Template 模式只在直接资源的顶层 metadata 写入 `apps.xiaoshiai.cn/instance-name` 和 `apps.xiaoshiai.cn/instance-namespace` annotations，不修改 Pod template、selector 或 Chart 自有 labels。这两个 annotation 是 native Instance 归属的保留键；渲染资源中已有的其他 Instance 归属会在安装前被拒绝。Helm 模式由 Helm adapter 写入 release ownership metadata。目标 Pod 的 `app.kubernetes.io/instance` label 属于 Application/Chart 运行时契约，Installer 不从直接资源向 Pod template 推导或覆盖它。
 
@@ -90,21 +89,16 @@ RawManifest 资源与来源渲染资源遵守相同的权限、归属、暂停�
 
 凡是会影响 Helm 渲染 manifest、但不出现在 values 中的输入，都必须纳入 post-render identity。此类输入变化时必须改变 identity version，避免 Helm 错误复用旧 release。
 
-Pod runtime 配置由 Flavor 拥有。Apps 将选中的 Flavor 展开到 Instance values 后，Chart 在对应
-workload 顶层声明 `apps.xiaoshiai.cn/flavor-path`，值为 RFC 6901 JSON Pointer，例如 `/flavor`
-或 `/prefill/flavor`。Post-renderer 从该对象读取 `schedulerName`、`runtimeClassName` 和
-`podLabels`，仅对 `type=Accelerator` 的 Flavor 生效，并写入 PodSpec 与 Pod template metadata。
-Chart 已声明的同名 runtime 字段或 label 与 Flavor 不一致时安装失败，避免静默覆盖。
-新增的 CPU NUMA 是显式例外：Flavor 的 `podAnnotations` 中
-`scheduling.xiaoshiai.cn/numa-policy=single-numa-node` 时，CPU 和 Accelerator Flavor 均可使用。
-Installer 校验 `volcano` scheduler，以及模板中所有普通/init 容器的整数 CPU、正值且相等的
-CPU/内存 requests/limits，将公共策略写入 workload 顶层 metadata，交由 Scheduling extension
-投影后端注解。仅支持 Deployment、StatefulSet、DaemonSet、Job；拒绝 Pod-level resources
-和不受 Scheduling admission 管理的其它 workload kind。未启用策略保持原有行为，其余
-Pod annotations 不因这次扩展开始投影。
-Helm 的 Flavor 路径基于 Chart 默认值与 Instance 运行时 values 的标准 coalesce 结果解析，
-Instance 值优先；可选角色仅在 Chart 默认值中声明也可正常解析。该合并不修改 Instance values。
-Native 来源没有 Chart 默认值，直接读取已解析的 Instance values；不存在的路径仍明确报错。
+Pod runtime 配置由 Cloud 编译到 Flavor，Apps 将选中的 Flavor 完整展开到 Instance values。
+Chart 根据 Helm 标准 values 合并结果读取对应角色的 Flavor，直接渲染 `schedulerName`、
+`runtimeClassName`、`podLabels` 和 `podAnnotations`。调度器与运行时写入 PodSpec，普通
+Pod 元数据合入 Pod template，并保留 Chart 的 selector 标签；多角色 Chart 分别消费各自
+的 Flavor。Installer 不读取 Flavor values 路径、不按 Flavor 类型注入字段，也不对模板结果
+进行 Flavor 冲突校验。Kustomize、Template 和 RawManifest 同样提供完整的运行配置。
+
+公共 NUMA 策略 `scheduling.xiaoshiai.cn/numa-policy` 由 Chart 从 Flavor 的 `podAnnotations`
+渲染到 workload 顶层 `metadata.annotations`。Scheduling admission 负责校验 scheduler、
+容器整数 CPU 与 Guaranteed QoS 等条件，并投影后端 Pod 注解；Installer 不重复校验或投影。
 
 Installer 不读取 `Scheduling` extension，也不注入 `global.scheduling`，不为旧 Instance 提供兼容
 分支。Gang 调度完全属于 Chart：Chart 自己创建 PodGroup，并在成员 Workload 顶层 metadata.annotations

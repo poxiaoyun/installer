@@ -28,10 +28,6 @@ const (
 	AnnotationInstanceName = GroupName + "/instance-name"
 	// AnnotationInstanceNamespace identifies the owning native Instance by namespace.
 	AnnotationInstanceNamespace = GroupName + "/instance-namespace"
-	// AnnotationFlavorPath is an RFC 6901 JSON Pointer to the resolved Flavor
-	// object in Instance values. Installer projects its Pod runtime fields onto
-	// the annotated workload.
-	AnnotationFlavorPath = GroupName + "/flavor-path"
 )
 
 const (
