@@ -166,7 +166,16 @@ func installChart(ctx context.Context, helmcfg *action.Configuration, loadedChar
 	install.WaitForJobs = options.WaitForJobs
 	install.SubNotes = options.SubNotes
 	install.PostRenderer = pr
-	install.ServerSideApply = false
+	// Keep server-side apply enabled. With client-side apply, adopting a resource that
+	// already exists with Helm ownership metadata silently does nothing for
+	// CRD/unstructured resources: existingResourceConflict in
+	// helm.sh/helm/v4/pkg/action/validate.go appends a shallow copy of the *desired*
+	// object, so createPatch in helm.sh/helm/v4/pkg/kube/client.go compares desired
+	// against desired on the unstructured branch, yields an empty patch, and
+	// patchResourceClientSide returns without patching. The install then reports
+	// success while the resource keeps its previous spec. Built-in kinds are unaffected
+	// because they merge three ways against the live object.
+	install.ServerSideApply = true
 	releaseValue, err := install.RunWithContext(ctx, loadedChart, values)
 	if err != nil {
 		return nil, err
@@ -189,7 +198,11 @@ func upgradeChart(ctx context.Context, helmcfg *action.Configuration, loadedChar
 	upgrade.WaitForJobs = options.WaitForJobs
 	upgrade.SubNotes = options.SubNotes
 	upgrade.PostRenderer = pr
-	upgrade.ServerSideApply = "false"
+	// "auto" keeps the apply method a release was installed with: new releases follow
+	// the install default (server-side apply), while releases created earlier with
+	// client-side apply keep using it and avoid a forced ownership migration. The
+	// field is a string with values "true", "false" or "auto".
+	upgrade.ServerSideApply = "auto"
 	releaseValue, err := upgrade.RunWithContext(ctx, rlsname, loadedChart, values)
 	if err != nil {
 		return nil, err
